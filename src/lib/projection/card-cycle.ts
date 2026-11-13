@@ -118,3 +118,22 @@ export function allocatePayment(
   }
   return { allocations, rest: left };
 }
+
+/**
+ * Fechas (corte y pago) de la cuota `number` de un consumo, según el ciclo vigente de la tarjeta.
+ * La deuda inicial se paga en la próxima fecha de pago a partir de su registro.
+ * Se usa para re-programar cuotas pendientes cuando cambian el día de corte o de pago.
+ */
+export function installmentDates(
+  purchase: ISODate,
+  number: number,
+  card: CardCycleConfig,
+  isOpening = false,
+): { statementDate: ISODate; dueDate: ISODate } {
+  if (isOpening) {
+    const dueDate = nextDayOnOrAfter(purchase, card.paymentDueDay);
+    return { statementDate: statementForDueDate(dueDate, card), dueDate };
+  }
+  const statementDate = dayInMonth(statementCloseFor(purchase, card.statementDay), card.statementDay, number - 1);
+  return { statementDate, dueDate: dueDateFor(statementDate, card.paymentDueDay) };
+}

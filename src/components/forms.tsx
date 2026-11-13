@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { AccountDto, EntityDto } from '@/lib/server/dto';
 import { api, emitDataChanged, useApi } from '@/lib/client/api';
-import { centsToDecimalString, formatMoney, type Cents } from '@/lib/money';
+import { centsToDecimalString, formatMoney, toCents, type Cents } from '@/lib/money';
 import { addDays } from '@/lib/dates';
 import { useApp } from './AppContext';
 import { Button, ErrorBox, Field, Modal, Toggle, useToast } from './ui';
@@ -153,8 +153,25 @@ export function EntityFormModal({
 }
 
 // ---------------------------------------------------------------- Cuenta
-export function AccountFormModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+/** Saldo / deuda inicial por moneda (GET /api/accounts/:id). */
+interface OpeningSlot {
+  currency: string | null;
+  amount: Cents;
+  date: string | null;
+  locked: boolean;
+}
+
+const LIQUID_TYPES: [string, string][] = [
+  ['BANK', 'Cuenta bancaria'],
+  ['CASH', 'Caja chica'],
+  ['WALLET', 'Billetera digital'],
+];
+
+/** Alta y edición de cuentas / tarjetas. Con `account` edita (la entidad no cambia). */
+export function AccountFormModal({ open, onClose, account }: { open: boolean; onClose: () => void; account?: AccountDto | null }) {
   const app = useApp();
+  const toast = useToast();
+  const editing = Boolean(account);
   const defaultEntity = useDefaultEntityId();
   const { loading, error, run, setError } = useSubmit();
   const [entityId, setEntityId] = useState(defaultEntity);
@@ -171,30 +188,48 @@ export function AccountFormModal({ open, onClose }: { open: boolean; onClose: ()
   const [limitForeign, setLimitForeign] = useState('');
   const [openingForeign, setOpeningForeign] = useState('0');
   const [customRate, setCustomRate] = useState('');
+  const [reschedule, setReschedule] = useState(true);
   const isCardType = type === 'CREDIT_CARD';
   const entityCurrency = app.entityById.get(entityId)?.currency ?? '';
   const foreignCurrency = entityCurrency === 'HNL' ? 'USD' : entityCurrency === 'USD' ? 'HNL' : null;
   const entityAccounts = useApi<AccountDto[]>(open && isCardType && entityId ? `/api/accounts?ctx=${entityId}` : null);
   const payable = useMemo(() => liquidAccounts(entityAccounts.data), [entityAccounts.data]);
+  const detail = useApi<AccountDto & { opening: OpeningSlot[] }>(open && account ? `/api/accounts/${account.id}` : null);
+  const slots = detail.data?.id === account?.id ? detail.data?.opening : undefined;
+  const baseSlot = slots?.find((x) => x.currency === null);
+  const foreignSlot = slots?.find((x) => x.currency !== null);
+  const anyLocked = Boolean(slots?.some((x) => x.locked));
+  const cycleChanged =
+    editing && isCardType && (Number(statementDay) !== account?.statementDay || Number(paymentDueDay) !== account?.paymentDueDay);
 
   useEffect(() => {
     if (!open) return;
     setError(null);
-    setEntityId(defaultEntity);
-    setName('');
-    setType('BANK');
-    setInstitution('');
+    setEntityId(account?.entityId ?? defaultEntity);
+    setName(account?.name ?? '');
+    setType(account?.type ?? 'BANK');
+    setInstitution(account?.institution ?? '');
     setOpening('0');
     setDate(app.today);
-    setCreditLimit('');
-    setStatementDay('15');
-    setPaymentDueDay('5');
-    setPayFrom('');
-    setDual(false);
-    setLimitForeign('');
+    setCreditLimit(account?.creditLimit != null ? centsInput(account.creditLimit) : '');
+    setStatementDay(String(account?.statementDay ?? 15));
+    setPaymentDueDay(String(account?.paymentDueDay ?? 5));
+    setPayFrom(account?.defaultPaymentAccountId ?? '');
+    setDual(Boolean(account?.foreignCurrency));
+    setLimitForeign(account?.creditLimitForeign != null ? centsInput(account.creditLimitForeign) : '');
     setOpeningForeign('0');
-    setCustomRate('');
-  }, [open, defaultEntity, app.today, setError]);
+    setCustomRate(account?.customSellRate ?? '');
+    setReschedule(true);
+  }, [open, account, defaultEntity, app.today, setError]);
+
+  // En edición, el saldo/deuda inicial llega con el detalle de la cuenta
+  useEffect(() => {
+    if (!open || !slots) return;
+    setOpening(centsInput(baseSlot?.amount ?? 0));
+    setOpeningForeign(centsInput(foreignSlot?.amount ?? 0));
+    setDate(baseSlot?.date ?? foreignSlot?.date ?? app.today);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, slots]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -211,6 +246,29 @@ export function AccountFormModal({ open, onClose }: { open: boolean; onClose: ()
     const openF = isDual ? parseMoneyInput(openingForeign || '0') : '0';
     if (openF === null || Number(openF) < 0) return setError(`Deuda en ${foreignCurrency} inválida`);
     if (isDual && customRate.trim() && !/^\d+(\.\d{1,4})?$/.test(customRate.trim())) return setError('Tasa propia inválida (hasta 4 decimales)');
+    const cardBody = isCardType ? { creditLimit: limit, statementDay: sd, paymentDueDay: pd, defaultPaymentAccountId: payFrom || null } : {};
+
+    if (account) {
+      if (!slots) return setError('Cargando el saldo inicial, intenta de nuevo');
+      // Solo se envía el saldo inicial si cambió (una deuda con pagos no se puede corregir aquí)
+      const body: Record<string, unknown> = { name, institution, ...cardBody };
+      if (!isCardType && type !== account.type) body.type = type;
+      if (isCardType) {
+        body.dualCurrency = isDual;
+        if (isDual) Object.assign(body, { creditLimitForeign: limF, customSellRate: customRate.trim() || null });
+        if (cycleChanged) body.rescheduleInstallments = reschedule;
+      }
+      if (toCents(amount) !== (baseSlot?.amount ?? 0)) body.openingBalance = amount;
+      if (isDual && toCents(openF) !== (foreignSlot?.amount ?? 0)) body.openingDebtForeign = openF;
+      if (date !== (baseSlot?.date ?? foreignSlot?.date ?? app.today)) body.openingDate = date;
+      const ok = await run(async () => {
+        const r = await api<{ rescheduled: number }>(`/api/accounts/${account.id}`, { method: 'PATCH', body });
+        toast(`${isCardType ? 'Tarjeta' : 'Cuenta'} actualizada${r.rescheduled ? ` · ${r.rescheduled} cuota(s) re-programada(s)` : ''}`);
+      });
+      if (ok) onClose();
+      return;
+    }
+
     const body = {
       entityId,
       name,
@@ -218,7 +276,7 @@ export function AccountFormModal({ open, onClose }: { open: boolean; onClose: ()
       institution,
       openingBalance: amount,
       openingDate: date,
-      ...(isCardType ? { creditLimit: limit, statementDay: sd, paymentDueDay: pd, defaultPaymentAccountId: payFrom || null } : {}),
+      ...cardBody,
       ...(isDual
         ? { dualCurrency: true, creditLimitForeign: limF, openingDebtForeign: openF, customSellRate: customRate.trim() || null }
         : {}),
@@ -227,23 +285,30 @@ export function AccountFormModal({ open, onClose }: { open: boolean; onClose: ()
     if (ok) onClose();
   }
 
+  const lockedHint = 'Ya tiene pagos aplicados: corrígela con "Conciliar"';
+  const openingLabel = isCardType ? (editing ? 'Deuda inicial' : 'Deuda actual') : editing ? 'Saldo inicial' : 'Saldo actual';
+
   return (
-    <Modal open={open} onClose={onClose} title="Nueva cuenta / caja">
+    <Modal open={open} onClose={onClose} title={editing ? `Editar ${isCardType ? 'tarjeta' : 'cuenta'}: ${account?.name ?? ''}` : 'Nueva cuenta / caja'}>
       <form onSubmit={submit} className="space-y-3">
         {error && <ErrorBox message={error} />}
-        <Field label="Entidad">
-          <EntitySelect value={entityId} onChange={setEntityId} />
-        </Field>
+        {!editing && (
+          <Field label="Entidad">
+            <EntitySelect value={entityId} onChange={setEntityId} />
+          </Field>
+        )}
         <div className="grid grid-cols-2 gap-3">
           <Field label="Nombre">
             <input className="input" value={name} onChange={(e) => setName(e.target.value)} required placeholder="BAC Corriente" />
           </Field>
           <Field label="Tipo">
-            <select className="input" value={type} onChange={(e) => setType(e.target.value)}>
-              <option value="BANK">Cuenta bancaria</option>
-              <option value="CASH">Caja chica</option>
-              <option value="WALLET">Billetera digital</option>
-              <option value="CREDIT_CARD">Tarjeta de crédito</option>
+            <select className="input" value={type} onChange={(e) => setType(e.target.value)} disabled={editing && isCardType}>
+              {LIQUID_TYPES.map(([v, l]) => (
+                <option key={v} value={v}>
+                  {l}
+                </option>
+              ))}
+              {(!editing || isCardType) && <option value="CREDIT_CARD">Tarjeta de crédito</option>}
             </select>
           </Field>
         </div>
@@ -263,6 +328,20 @@ export function AccountFormModal({ open, onClose }: { open: boolean; onClose: ()
                 <input className="input text-right" inputMode="decimal" value={creditLimit} onChange={(e) => setCreditLimit(e.target.value)} />
               </Field>
             </div>
+            {cycleChanged && (
+              <div className="rounded-lg bg-amber-50 p-2 dark:bg-amber-500/10">
+                <Toggle
+                  checked={reschedule}
+                  onChange={setReschedule}
+                  label={<span className="text-sm">Re-programar las cuotas pendientes con el nuevo ciclo</span>}
+                />
+                <p className="mt-1 text-xs text-slate-500">
+                  {reschedule
+                    ? 'Las cuotas no pagadas se mueven al corte y fecha de pago que les toca con los nuevos días.'
+                    : 'Las cuotas ya registradas conservan sus fechas; solo los consumos nuevos usarán el nuevo ciclo.'}
+                </p>
+              </div>
+            )}
             {foreignCurrency && (
               <Toggle
                 checked={dual}
@@ -275,8 +354,17 @@ export function AccountFormModal({ open, onClose }: { open: boolean; onClose: ()
                 <Field label={`Límite ${foreignCurrency} (opcional)`}>
                   <input className="input text-right" inputMode="decimal" value={limitForeign} onChange={(e) => setLimitForeign(e.target.value)} />
                 </Field>
-                <Field label={`Deuda actual ${foreignCurrency}`}>
-                  <input className="input text-right" inputMode="decimal" value={openingForeign} onChange={(e) => setOpeningForeign(e.target.value)} />
+                <Field
+                  label={`${editing ? 'Deuda inicial' : 'Deuda actual'} ${foreignCurrency}`}
+                  hint={foreignSlot?.locked ? lockedHint : undefined}
+                >
+                  <input
+                    className="input text-right"
+                    inputMode="decimal"
+                    value={openingForeign}
+                    onChange={(e) => setOpeningForeign(e.target.value)}
+                    disabled={foreignSlot?.locked}
+                  />
                 </Field>
                 <Field label="Tasa propia (opcional)" hint={`Global: ${app.fx?.effectiveSellRate ?? '—'}`}>
                   <input className="input text-right" inputMode="decimal" value={customRate} onChange={(e) => setCustomRate(e.target.value)} placeholder={app.fx?.effectiveSellRate} />
@@ -300,19 +388,35 @@ export function AccountFormModal({ open, onClose }: { open: boolean; onClose: ()
           </div>
         )}
         <div className="grid grid-cols-2 gap-3">
-          <Field label={`${isCardType ? 'Deuda actual' : 'Saldo actual'} (${entityCurrency})`} hint={isCardType ? 'Se proyecta en la próxima fecha de pago' : undefined}>
-            <input className="input text-right" inputMode="decimal" value={opening} onChange={(e) => setOpening(e.target.value)} />
+          <Field
+            label={`${openingLabel} (${entityCurrency})`}
+            hint={baseSlot?.locked ? lockedHint : isCardType ? 'Se proyecta en la próxima fecha de pago' : undefined}
+          >
+            <input
+              className="input text-right"
+              inputMode="decimal"
+              value={opening}
+              onChange={(e) => setOpening(e.target.value)}
+              disabled={baseSlot?.locked || (editing && !slots)}
+            />
           </Field>
           <Field label="Fecha del saldo">
-            <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
+            <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} required disabled={anyLocked} />
           </Field>
         </div>
+        {editing && (
+          <p className="text-xs text-slate-500">
+            Corregir el {isCardType ? 'saldo o la deuda inicial' : 'saldo inicial'} cambia la Caja real y toda la proyección en la misma
+            diferencia. Si el saldo inicial estaba bien y lo que no cuadra es el saldo de hoy, usa <strong>Conciliar</strong>: deja un
+            ajuste con fecha y no reescribe la historia.
+          </p>
+        )}
         <div className="flex justify-end gap-2 pt-2">
           <Button type="button" onClick={onClose}>
             Cancelar
           </Button>
           <Button type="submit" variant="primary" loading={loading}>
-            {isCardType ? 'Crear tarjeta' : 'Crear cuenta'}
+            {editing ? 'Guardar cambios' : isCardType ? 'Crear tarjeta' : 'Crear cuenta'}
           </Button>
         </div>
       </form>

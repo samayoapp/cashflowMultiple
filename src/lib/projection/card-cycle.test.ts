@@ -3,6 +3,7 @@ import {
   allocatePayment,
   buildSchedule,
   dueDateFor,
+  installmentDates,
   nextDayOnOrAfter,
   paymentDateForPurchase,
   splitInstallments,
@@ -104,5 +105,31 @@ describe('asignación de pagos', () => {
     const r = allocatePayment(inst, 1100_00);
     expect(r.allocations.reduce((s, a) => s + a.amount, 0)).toBe(1000_00);
     expect(r.rest).toBe(100_00);
+  });
+});
+
+describe('re-programación de cuotas', () => {
+  it('coincide con buildSchedule para cada cuota', () => {
+    const s = buildSchedule('2026-01-20', 90000, 3, VISA);
+    for (const i of s) {
+      expect(installmentDates('2026-01-20', i.number, VISA)).toEqual({ statementDate: i.statementDate, dueDate: i.dueDate });
+    }
+  });
+
+  it('cambiar el ciclo mueve las fechas', () => {
+    // Compra 10-ene: con corte 15/pago 5 vence 5-feb; con corte 3/pago 24 cae en el corte 3-feb y vence 24-feb
+    expect(installmentDates('2026-01-10', 1, VISA).dueDate).toBe('2026-02-05');
+    expect(installmentDates('2026-01-10', 1, { statementDay: 3, paymentDueDay: 24 })).toEqual({
+      statementDate: '2026-02-03',
+      dueDate: '2026-02-24',
+    });
+  });
+
+  it('deuda inicial: próxima fecha de pago desde su registro', () => {
+    expect(installmentDates('2026-11-13', 1, { statementDay: 3, paymentDueDay: 24 }, true)).toEqual({
+      statementDate: '2026-11-03',
+      dueDate: '2026-11-24',
+    });
+    expect(installmentDates('2026-11-13', 1, VISA, true).dueDate).toBe('2026-12-05');
   });
 });

@@ -61,7 +61,7 @@ function AccountsTab() {
   const app = useApp();
   const act = useAction();
   const { data, error, loading } = useApi<AccountDto[]>(`/api/accounts?ctx=${encodeURIComponent(app.ctx)}`);
-  const [creating, setCreating] = useState(false);
+  const [form, setForm] = useState<{ open: boolean; account: AccountDto | null }>({ open: false, account: null });
   const [reconciling, setReconciling] = useState<AccountDto | null>(null);
   const [actual, setActual] = useState('');
 
@@ -78,7 +78,7 @@ function AccountsTab() {
         <p className="text-sm text-slate-500">
           Saldos reales = apertura + cobros − pagos ± ajustes. Las tarjetas muestran su deuda y no suman a la caja real.
         </p>
-        <Button variant="primary" onClick={() => setCreating(true)}>
+        <Button variant="primary" onClick={() => setForm({ open: true, account: null })}>
           <Plus className="h-4 w-4" /> Nueva cuenta
         </Button>
       </div>
@@ -140,6 +140,11 @@ function AccountsTab() {
                     <td className="td">
                       <div className="flex justify-end gap-1">
                         {!a.archived && (
+                          <Button size="sm" variant="ghost" title="Editar" onClick={() => setForm({ open: true, account: a })}>
+                            <Pencil className="h-4 w-4" />
+                          </Button>
+                        )}
+                        {!a.archived && (
                           <Button
                             size="sm"
                             onClick={() => {
@@ -168,7 +173,7 @@ function AccountsTab() {
           </table>
         </div>
       )}
-      <AccountFormModal open={creating} onClose={() => setCreating(false)} />
+      <AccountFormModal open={form.open} account={form.account} onClose={() => setForm({ open: false, account: null })} />
       <Modal
         open={Boolean(reconciling)}
         onClose={() => setReconciling(null)}
