@@ -7,7 +7,7 @@ import { Badge, Button, Card, cn, EmptyState, ErrorBox, Field, Loading, Modal, T
 import { EntityDot } from '@/components/AppShell';
 import { AccountFormModal, centsInput, EntityFormModal, parseMoneyInput } from '@/components/forms';
 import { api, emitDataChanged, useApi } from '@/lib/client/api';
-import { formatMoney } from '@/lib/money';
+import { centsToDecimalString, formatMoney, toCents } from '@/lib/money';
 import type { AccountDto, EntityDto } from '@/lib/server/dto';
 
 type Tab = 'entities' | 'accounts' | 'rates' | 'users' | 'general';
@@ -65,12 +65,15 @@ function AccountsTab() {
   const [reconciling, setReconciling] = useState<AccountDto | null>(null);
   const [actual, setActual] = useState('');
 
-  const TYPE: Record<string, string> = { BANK: 'Banco', CASH: 'Caja chica', WALLET: 'Billetera' };
+  const TYPE: Record<string, string> = { BANK: 'Banco', CASH: 'Caja chica', WALLET: 'Billetera', CREDIT_CARD: 'Tarjeta de crédito' };
+  const recIsCard = reconciling?.type === 'CREDIT_CARD';
 
   return (
     <Card className="p-0 sm:p-0">
       <div className="flex items-center justify-between border-b border-slate-200 p-3 dark:border-slate-800">
-        <p className="text-sm text-slate-500">Saldos reales = saldo de apertura + cobros − pagos ± ajustes de conciliación.</p>
+        <p className="text-sm text-slate-500">
+          Saldos reales = apertura + cobros − pagos ± ajustes. Las tarjetas muestran su deuda y no suman a la caja real.
+        </p>
         <Button variant="primary" onClick={() => setCreating(true)}>
           <Plus className="h-4 w-4" /> Nueva cuenta
         </Button>
@@ -109,8 +112,22 @@ function AccountsTab() {
                         {e && <EntityDot color={e.color} />} {e?.name}
                       </span>
                     </td>
-                    <td className="td">{TYPE[a.type]}</td>
-                    <td className={cn('td num font-semibold', a.balance < 0 && 'text-rose-600')}>{formatMoney(a.balance, e?.currency ?? 'HNL')}</td>
+                    <td className="td">
+                      {TYPE[a.type]}
+                      {a.type === 'CREDIT_CARD' && (
+                        <div className="text-xs text-slate-500">
+                          Corte {a.statementDay} · pago {a.paymentDueDay}
+                          {a.creditLimit ? ` · límite ${formatMoney(a.creditLimit, e?.currency ?? 'HNL')}` : ''}
+                        </div>
+                      )}
+                    </td>
+                    {a.type === 'CREDIT_CARD' ? (
+                      <td className="td num font-semibold text-rose-600">
+                        {a.balance < 0 ? `Deuda ${formatMoney(-a.balance, e?.currency ?? 'HNL')}` : formatMoney(a.balance, e?.currency ?? 'HNL')}
+                      </td>
+                    ) : (
+                      <td className={cn('td num font-semibold', a.balance < 0 && 'text-rose-600')}>{formatMoney(a.balance, e?.currency ?? 'HNL')}</td>
+                    )}
                     <td className="td">
                       <div className="flex justify-end gap-1">
                         {!a.archived && (
@@ -118,7 +135,7 @@ function AccountsTab() {
                             size="sm"
                             onClick={() => {
                               setReconciling(a);
-                              setActual(centsInput(a.balance));
+                              setActual(centsInput(a.type === 'CREDIT_CARD' ? -a.balance : a.balance));
                             }}
                           >
                             <Scale className="h-3.5 w-3.5" /> Conciliar
@@ -154,8 +171,10 @@ function AccountsTab() {
               onClick={async () => {
                 const v = parseMoneyInput(actual);
                 if (v === null || !reconciling) return;
+                // En tarjetas se captura la deuda (positiva); el saldo contable es su negativo
+                const balance = recIsCard ? centsToDecimalString(-toCents(v)) : v;
                 const ok = await act(
-                  () => api(`/api/accounts/${reconciling.id}/reconcile`, { body: { actualBalance: v } }),
+                  () => api(`/api/accounts/${reconciling.id}/reconcile`, { body: { actualBalance: balance } }),
                   'Saldo conciliado',
                 );
                 if (ok) setReconciling(null);
@@ -166,11 +185,19 @@ function AccountsTab() {
           </>
         }
       >
-        <p className="mb-3 text-sm text-slate-500">
-          Saldo en sistema: <strong>{reconciling && formatMoney(reconciling.balance, app.entityById.get(reconciling.entityId)?.currency ?? 'HNL')}</strong>. Ingresa
-          el saldo que muestra el banco hoy; la diferencia se registra como ajuste.
-        </p>
-        <Field label="Saldo real según banco">
+        {recIsCard ? (
+          <p className="mb-3 text-sm text-slate-500">
+            Deuda en sistema: <strong>{reconciling && formatMoney(Math.max(-reconciling.balance, 0), app.entityById.get(reconciling.entityId)?.currency ?? 'HNL')}</strong>.
+            Ingresa la deuda que muestra el banco (p. ej. con intereses o comisiones); la diferencia se registra como ajuste. Para
+            proyectar su pago, registra los intereses como un consumo.
+          </p>
+        ) : (
+          <p className="mb-3 text-sm text-slate-500">
+            Saldo en sistema: <strong>{reconciling && formatMoney(reconciling.balance, app.entityById.get(reconciling.entityId)?.currency ?? 'HNL')}</strong>. Ingresa
+            el saldo que muestra el banco hoy; la diferencia se registra como ajuste.
+          </p>
+        )}
+        <Field label={recIsCard ? 'Deuda según estado de cuenta' : 'Saldo real según banco'}>
           <input className="input text-right" inputMode="decimal" value={actual} onChange={(e) => setActual(e.target.value)} autoFocus />
         </Field>
       </Modal>

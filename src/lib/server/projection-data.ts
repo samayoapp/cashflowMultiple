@@ -4,6 +4,7 @@ import type { ResolvedContext } from './scope';
 import { todayInTz } from '@/lib/dates';
 import type {
   EngineAccountBalance,
+  EngineCardInstallment,
   EngineEntity,
   EngineObligation,
   EngineOverride,
@@ -30,14 +31,65 @@ export async function getDefaultScenarioId(): Promise<string> {
   return created.id;
 }
 
-/** Saldo real por cuenta = suma de movimientos (incluye el de apertura). */
+/**
+ * Saldo real por cuenta = suma de movimientos (incluye el de apertura).
+ * Las tarjetas se marcan como CREDIT_CARD (saldo negativo = deuda) para que no sumen a la caja.
+ */
 export async function getAccountBalances(entityIds: string[]): Promise<EngineAccountBalance[]> {
-  const rows = await prisma.cashMovement.groupBy({
-    by: ['accountId', 'entityId'],
-    where: { entityId: { in: entityIds } },
-    _sum: { amount: true },
+  const [rows, cards] = await Promise.all([
+    prisma.cashMovement.groupBy({
+      by: ['accountId', 'entityId'],
+      where: { entityId: { in: entityIds } },
+      _sum: { amount: true },
+    }),
+    prisma.account.findMany({ where: { entityId: { in: entityIds }, type: 'CREDIT_CARD' }, select: { id: true } }),
+  ]);
+  const cardIds = new Set(cards.map((c) => c.id));
+  return rows.map((r) => ({
+    accountId: r.accountId,
+    entityId: r.entityId,
+    balance: cents(r._sum.amount),
+    kind: cardIds.has(r.accountId) ? ('CREDIT_CARD' as const) : ('LIQUID' as const),
+  }));
+}
+
+/** Cuotas de tarjeta con saldo pendiente (settledAmount < amount). */
+export async function getPendingCardInstallments(entityIds: string[]): Promise<EngineCardInstallment[]> {
+  const rows = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT id FROM "CardInstallment"
+    WHERE "entityId" = ANY(${entityIds}) AND "settledAmount" < "amount"`;
+  if (rows.length === 0) return [];
+  const list = await prisma.cardInstallment.findMany({
+    where: { id: { in: rows.map((r) => r.id) } },
+    include: {
+      card: { select: { name: true } },
+      charge: {
+        select: {
+          description: true,
+          purchaseDate: true,
+          category: { select: { name: true } },
+          counterparty: { select: { name: true } },
+        },
+      },
+    },
   });
-  return rows.map((r) => ({ accountId: r.accountId, entityId: r.entityId, balance: cents(r._sum.amount) }));
+  return list.map((i) => ({
+    id: i.id,
+    chargeId: i.chargeId,
+    entityId: i.entityId,
+    cardAccountId: i.cardAccountId,
+    cardName: i.card.name,
+    description: i.charge.description,
+    categoryName: i.charge.category?.name ?? null,
+    counterpartyName: i.charge.counterparty?.name ?? null,
+    purchaseDate: isoOf(i.charge.purchaseDate),
+    number: i.number,
+    count: i.count,
+    amount: cents(i.amount),
+    settled: cents(i.settledAmount),
+    statementDate: isoOf(i.statementDate),
+    dueDate: isoOf(i.dueDate),
+  }));
 }
 
 /** Arma el input completo del motor de proyección para el contexto. */
@@ -46,7 +98,7 @@ export async function loadProjectionInput(ctx: ResolvedContext, whatIf: boolean)
   const today = todayInTz(settings.timezone);
   const entityIds = ctx.entityIds;
 
-  const [entities, balances, obligations, rules, scenarioId, rates] = await Promise.all([
+  const [entities, balances, obligations, rules, scenarioId, rates, cardInstallments] = await Promise.all([
     prisma.entity.findMany({ where: { id: { in: entityIds } }, orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }] }),
     getAccountBalances(entityIds),
     prisma.obligation.findMany({
@@ -70,6 +122,7 @@ export async function loadProjectionInput(ctx: ResolvedContext, whatIf: boolean)
     }),
     getDefaultScenarioId(),
     prisma.exchangeRate.findMany(),
+    getPendingCardInstallments(entityIds),
   ]);
 
   const overrides = await prisma.scenarioOverride.findMany({
@@ -144,6 +197,7 @@ export async function loadProjectionInput(ctx: ResolvedContext, whatIf: boolean)
     rules: engineRules,
     overrides: engineOverrides,
     rates: engineRates,
+    cardInstallments,
     outputCurrency,
     consolidated: ctx.consolidated,
     whatIf,

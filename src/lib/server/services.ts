@@ -5,6 +5,7 @@ import { cents, dbDate, dec, isoOf } from './serialize';
 import { expandRule } from '@/lib/projection/recurrence';
 import type { ISODate } from '@/lib/dates';
 import type { Cents } from '@/lib/money';
+import { insertCardCharge } from './cards';
 
 type Tx = Prisma.TransactionClient;
 
@@ -26,6 +27,8 @@ export async function registerPayment(args: {
   amount: Cents;
   date: ISODate;
   note?: string | null;
+  /** Solo si la cuenta es una tarjeta de crédito: número de cuotas (1..36). */
+  installments?: number;
   userId: string;
 }) {
   return prisma.$transaction(async (tx) => {
@@ -38,6 +41,15 @@ export async function registerPayment(args: {
     const account = await tx.account.findUnique({ where: { id: args.accountId } });
     if (!account || account.entityId !== ob.entityId) throw badRequest('La cuenta no pertenece a la entidad');
     if (account.archivedAt) throw badRequest('La cuenta está archivada');
+    const isCard = account.type === 'CREDIT_CARD';
+    if (isCard && ob.direction === 'IN') throw badRequest('Un cobro no puede registrarse en una tarjeta de crédito');
+    if (isCard) {
+      // Un consumo con tarjeta liquida la CxP completa: la deuda pasa a la tarjeta
+      if (args.amount !== remaining) throw badRequest('Con tarjeta se paga el saldo pendiente completo');
+      if (await tx.cardCharge.findUnique({ where: { obligationId: ob.id } })) {
+        throw conflict('Esta partida ya fue pagada con tarjeta');
+      }
+    }
 
     const signed = ob.direction === 'IN' ? args.amount : -args.amount;
     const movement = await tx.cashMovement.create({
@@ -47,10 +59,24 @@ export async function registerPayment(args: {
         type: 'PAYMENT',
         amount: dec(signed),
         date: dbDate(args.date),
-        description: `${ob.direction === 'IN' ? 'Cobro' : 'Pago'}: ${ob.description}`,
+        description: `${isCard ? 'Consumo' : ob.direction === 'IN' ? 'Cobro' : 'Pago'}: ${ob.description}`,
         createdById: args.userId,
       },
     });
+    if (isCard) {
+      // La categoría vive en la CxP; el consumo no la repite para no duplicar el gasto
+      await insertCardCharge(tx, {
+        card: account,
+        purchaseDate: args.date,
+        description: ob.description,
+        amount: args.amount,
+        installments: args.installments ?? 1,
+        counterpartyId: ob.counterpartyId,
+        obligationId: ob.id,
+        movementId: movement.id,
+        userId: args.userId,
+      });
+    }
     const payment = await tx.payment.create({
       data: {
         obligationId: ob.id,
@@ -129,11 +155,7 @@ export async function materializeOccurrence(ruleId: string, date: ISODate, userI
   }
 }
 
-/**
- * Crea una transferencia inter-entidad PLANIFICADA: dos partidas espejo
- * (salida en origen, entrada en destino) con el mismo transferId.
- */
-export async function createTransfer(args: {
+interface TransferArgs {
   kind: 'LOAN' | 'CONTRIBUTION' | 'TRANSFER';
   fromEntityId: string;
   toEntityId: string;
@@ -142,11 +164,24 @@ export async function createTransfer(args: {
   expectedDate: ISODate;
   description: string | null;
   userId: string;
-}) {
+  /** Categoría de la partida de salida (p. ej. gasto reembolsado a otra entidad). */
+  outCategoryId?: string | null;
+}
+
+/**
+ * Crea una transferencia inter-entidad PLANIFICADA: dos partidas espejo
+ * (salida en origen, entrada en destino) con el mismo transferId.
+ */
+export async function createTransfer(args: TransferArgs) {
+  return prisma.$transaction((tx) => createTransferTx(tx, args));
+}
+
+/** Igual que createTransfer, dentro de una transacción existente. */
+export async function createTransferTx(tx: Tx, args: TransferArgs) {
   if (args.fromEntityId === args.toEntityId) throw badRequest('Origen y destino deben ser entidades distintas');
   const [from, to] = await Promise.all([
-    prisma.entity.findUnique({ where: { id: args.fromEntityId } }),
-    prisma.entity.findUnique({ where: { id: args.toEntityId } }),
+    tx.entity.findUnique({ where: { id: args.fromEntityId } }),
+    tx.entity.findUnique({ where: { id: args.toEntityId } }),
   ]);
   if (!from || !to) throw notFound('Entidad no encontrada');
 
@@ -154,47 +189,46 @@ export async function createTransfer(args: {
     args.description ||
     `${args.kind === 'LOAN' ? 'Préstamo' : args.kind === 'CONTRIBUTION' ? 'Aporte' : 'Transferencia'}`;
 
-  return prisma.$transaction(async (tx) => {
-    const t = await tx.interEntityTransfer.create({
-      data: {
-        kind: args.kind,
-        fromEntityId: from.id,
-        toEntityId: to.id,
-        amountFrom: dec(args.amountFrom),
-        amountTo: dec(args.amountTo),
+  const t = await tx.interEntityTransfer.create({
+    data: {
+      kind: args.kind,
+      fromEntityId: from.id,
+      toEntityId: to.id,
+      amountFrom: dec(args.amountFrom),
+      amountTo: dec(args.amountTo),
+      expectedDate: dbDate(args.expectedDate),
+      description: args.description,
+      createdById: args.userId,
+    },
+  });
+  await tx.obligation.createMany({
+    data: [
+      {
+        entityId: from.id,
+        direction: 'OUT',
+        description: `${label} → ${to.name}`,
+        amount: dec(args.amountFrom),
+        dueDate: dbDate(args.expectedDate),
         expectedDate: dbDate(args.expectedDate),
-        description: args.description,
+        priority: 'FLEXIBLE',
+        transferId: t.id,
+        categoryId: args.outCategoryId ?? null,
         createdById: args.userId,
       },
-    });
-    await tx.obligation.createMany({
-      data: [
-        {
-          entityId: from.id,
-          direction: 'OUT',
-          description: `${label} → ${to.name}`,
-          amount: dec(args.amountFrom),
-          dueDate: dbDate(args.expectedDate),
-          expectedDate: dbDate(args.expectedDate),
-          priority: 'FLEXIBLE',
-          transferId: t.id,
-          createdById: args.userId,
-        },
-        {
-          entityId: to.id,
-          direction: 'IN',
-          description: `${label} ← ${from.name}`,
-          amount: dec(args.amountTo),
-          dueDate: dbDate(args.expectedDate),
-          expectedDate: dbDate(args.expectedDate),
-          priority: 'FLEXIBLE',
-          transferId: t.id,
-          createdById: args.userId,
-        },
-      ],
-    });
-    return t;
+      {
+        entityId: to.id,
+        direction: 'IN',
+        description: `${label} ← ${from.name}`,
+        amount: dec(args.amountTo),
+        dueDate: dbDate(args.expectedDate),
+        expectedDate: dbDate(args.expectedDate),
+        priority: 'FLEXIBLE',
+        transferId: t.id,
+        createdById: args.userId,
+      },
+    ],
   });
+  return t;
 }
 
 /** Ejecuta una transferencia: mueve caja real en ambas entidades y cierra sus partidas. */
@@ -217,6 +251,9 @@ export async function executeTransfer(args: {
     ]);
     if (!fromAcc || fromAcc.entityId !== t.fromEntityId) throw badRequest('Cuenta de origen inválida');
     if (!toAcc || toAcc.entityId !== t.toEntityId) throw badRequest('Cuenta de destino inválida');
+    if (fromAcc.type === 'CREDIT_CARD' || toAcc.type === 'CREDIT_CARD') {
+      throw badRequest('Las transferencias entre entidades usan cuentas líquidas, no tarjetas');
+    }
 
     const obligations = await tx.obligation.findMany({ where: { transferId: t.id } });
     const date = dbDate(args.date);

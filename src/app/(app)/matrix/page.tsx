@@ -1,11 +1,12 @@
 'use client';
 
 import { Fragment, useMemo, useState } from 'react';
-import { ChevronDown, ChevronRight, Eye, EyeOff, FlaskConical, Plus, RotateCcw } from 'lucide-react';
+import { ChevronDown, ChevronRight, CreditCard, Eye, EyeOff, FlaskConical, Plus, RotateCcw } from 'lucide-react';
 import { useApp } from '@/components/AppContext';
 import { Badge, Button, Card, cn, ErrorBox, Loading, Tabs, useToast } from '@/components/ui';
 import { EntityDot } from '@/components/AppShell';
 import { ObligationFormModal, parseMoneyInput } from '@/components/forms';
+import { CardPaymentModal, type CardPaymentTarget } from '@/components/cards';
 import { useProjection, type ProjectionPayload } from '@/lib/client/useProjection';
 import { api, emitDataChanged } from '@/lib/client/api';
 import { project } from '@/lib/projection/engine';
@@ -79,6 +80,15 @@ export default function MatrixPage() {
   const [open, setOpen] = useState<{ IN: boolean; OUT: boolean }>({ IN: true, OUT: true });
   const [editing, setEditing] = useState<{ key: string; value: string } | null>(null);
   const [creating, setCreating] = useState<'IN' | 'OUT' | null>(null);
+  const [expandedCards, setExpandedCards] = useState<Set<string>>(new Set());
+  const [cardPay, setCardPay] = useState<CardPaymentTarget | null>(null);
+  const toggleCard = (key: string) =>
+    setExpandedCards((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
 
   const columns = useMemo(() => (data ? buildColumns(view, data) : []), [view, data]);
 
@@ -176,6 +186,7 @@ export default function MatrixPage() {
   }
 
   async function moveTo(item: ProjectedItem, targetCol: number) {
+    if (item.source === 'CARD_STATEMENT') return toast('La fecha del pago de tarjeta la define su ciclo de corte', 'error');
     const current = columns.findIndex((c) => item.date >= c.start && item.date <= c.end);
     if (current === targetCol || current < 0) return;
     let newDate =
@@ -216,8 +227,76 @@ export default function MatrixPage() {
   const consolidated = result.consolidated;
   const stickyCell = 'sticky left-0 z-10 bg-white dark:bg-slate-900';
 
+  const renderCardRows = (item: ProjectedItem, col: number) => {
+    const e = app.entityById.get(item.entityId);
+    const expanded = expandedCards.has(item.key);
+    const details = item.cardDetails ?? [];
+    return (
+      <Fragment key={item.key}>
+        <tr className="group border-t border-slate-100 hover:bg-slate-50/70 dark:border-slate-800/70 dark:hover:bg-slate-800/30">
+          <td className={cn(stickyCell, 'max-w-[18rem] py-1.5 pl-8 pr-3 group-hover:bg-slate-50 dark:group-hover:bg-slate-800/60')}>
+            <div className="flex items-center gap-1.5">
+              {consolidated && e && <EntityDot color={e.color} />}
+              <button onClick={() => toggleCard(item.key)} className="flex min-w-0 items-center gap-1 text-left text-sm" title="Ver consumos del estado de cuenta">
+                {expanded ? <ChevronDown className="h-3.5 w-3.5 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0" />}
+                <CreditCard className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+                <span className="truncate">{item.description}</span>
+              </button>
+              <button
+                onClick={() => item.cardAccountId && setCardPay({ cardId: item.cardAccountId, entityId: item.entityId, suggested: item.amountNative })}
+                className="ml-auto shrink-0 rounded px-1.5 py-0.5 text-[11px] text-brand-600 opacity-0 hover:bg-brand-50 group-hover:opacity-100 dark:hover:bg-brand-500/10"
+              >
+                Pagar
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-1 pt-0.5">
+              {item.overdue && <Badge tone="red">Vencido · requiere pago</Badge>}
+              <Badge tone="blue">
+                {details.length} consumo{details.length === 1 ? '' : 's'} · límite {formatShortDate(item.dueDate)}
+              </Badge>
+            </div>
+          </td>
+          {columns.map((c, i) => (
+            <td key={c.key} className="px-1 py-1 text-right">
+              {i === col && (
+                <span
+                  className="inline-block rounded px-2 py-1 text-sm font-medium tabular-nums text-rose-700 dark:text-rose-400"
+                  title={item.nativeCurrency !== currency ? formatMoney(item.amountNative, item.nativeCurrency) : 'Se modifica desde Operaciones → Tarjetas'}
+                >
+                  {formatMoney(item.amount, currency).replace(currency, '').trim()}
+                </span>
+              )}
+            </td>
+          ))}
+        </tr>
+        {expanded &&
+          details.map((d) => (
+            <tr key={d.installmentId} className="border-t border-dashed border-slate-100 bg-slate-50/50 dark:border-slate-800/50 dark:bg-slate-800/20">
+              <td className={cn(stickyCell, 'max-w-[18rem] bg-slate-50 py-1 pl-14 pr-3 dark:bg-slate-800/60')}>
+                <div className="truncate text-xs" title={d.description}>
+                  {d.description}
+                  {d.count > 1 && <span className="text-slate-500"> · cuota {d.number}/{d.count}</span>}
+                </div>
+                <div className="truncate text-[11px] text-slate-500">
+                  {formatShortDate(d.purchaseDate)}
+                  {d.categoryName && ` · ${d.categoryName}`}
+                  {d.counterpartyName && ` · ${d.counterpartyName}`}
+                </div>
+              </td>
+              {columns.map((c, i) => (
+                <td key={c.key} className="px-3 py-1 text-right text-xs tabular-nums text-slate-500">
+                  {i === col ? formatMoney(d.pendingNative, item.nativeCurrency).replace(item.nativeCurrency, '').trim() : ''}
+                </td>
+              ))}
+            </tr>
+          ))}
+      </Fragment>
+    );
+  };
+
   const renderItemRows = (rows: { item: ProjectedItem; col: number }[]) =>
     rows.map(({ item, col }) => {
+      if (item.source === 'CARD_STATEMENT') return renderCardRows(item, col);
       const e = app.entityById.get(item.entityId);
       const editKey = item.key;
       return (
@@ -427,7 +506,7 @@ export default function MatrixPage() {
       )}
 
       <p className="text-xs text-slate-500">
-        Las partidas vencidas se muestran en la semana actual. Días hasta la última columna:{' '}
+        Las partidas vencidas se muestran en la semana actual. Los pagos de tarjeta agrupan sus consumos en la fecha límite de pago. Días hasta la última columna:{' '}
         {diffDays(columns[columns.length - 1].end, result.today)}.
       </p>
 
@@ -437,6 +516,7 @@ export default function MatrixPage() {
         direction={creating ?? 'IN'}
         hypothetical={whatIf}
       />
+      <CardPaymentModal open={Boolean(cardPay)} onClose={() => setCardPay(null)} target={cardPay} />
     </div>
   );
 }

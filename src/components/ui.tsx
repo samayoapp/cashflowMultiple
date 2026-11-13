@@ -161,6 +161,7 @@ export function Tabs<T extends string>({
     <div className="flex flex-wrap gap-1 rounded-xl bg-slate-100 p-1 dark:bg-slate-900">
       {tabs.map((t) => (
         <button
+          type="button"
           key={t.id}
           onClick={() => onChange(t.id)}
           className={cn(

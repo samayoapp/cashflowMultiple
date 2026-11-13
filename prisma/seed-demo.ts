@@ -4,11 +4,14 @@
  * - Solo carga datos en la Entidad Base si todavía no tiene cuentas.
  * Crea: segunda entidad en USD, cuentas, CxC/CxP (con vencidas y abonos),
  * recurrencias, una transferencia inter-entidad, tasas HNL/USD/EUR y partidas hipotéticas.
+ * - Tarjeta demo "Visa Empresarial (demo)" en la Entidad Base (solo si no existe):
+ *   consumos categorizados, una compra a 6 cuotas, deuda inicial y un pago parcial.
  */
 import { PrismaClient, type Direction, type Priority } from '@prisma/client';
 import { addDays, todayInTz } from '../src/lib/dates';
 import { centsToDecimalString } from '../src/lib/money';
 import { createTransfer, registerPayment } from '../src/lib/server/services';
+import { createCardCharge, createOpeningDebt, payCreditCard } from '../src/lib/server/cards';
 
 const prisma = new PrismaClient();
 const DEMO_NAME = 'Publimatec Digital (demo)';
@@ -21,8 +24,10 @@ async function main() {
   const admin = await prisma.user.findFirst({ where: { role: 'ADMIN' } });
   if (!admin) throw new Error('Primero arranca la app para crear el usuario ADMIN (bootstrap).');
 
+  await seedCardDemo(today, admin.id);
+
   if (await prisma.entity.findFirst({ where: { name: DEMO_NAME } })) {
-    console.log('La entidad demo ya existe. Nada que hacer.');
+    console.log('La entidad demo ya existe. Nada más que hacer.');
     return;
   }
   const base = await prisma.entity.findFirst({ where: { isDefault: true } });
@@ -163,6 +168,76 @@ async function main() {
 
   console.log(`  -> Entidad demo creada: ${DEMO_NAME}`);
   console.log('Listo. Abre el dashboard y alterna entre la vista consolidada y cada entidad.');
+}
+
+const CARD_NAME = 'Visa Empresarial (demo)';
+
+/** Tarjeta de crédito demo en la Entidad Base. Idempotente: si ya existe, no hace nada. */
+async function seedCardDemo(today: string, userId: string) {
+  const base = await prisma.entity.findFirst({ where: { isDefault: true } });
+  if (!base) return;
+  if (await prisma.account.findFirst({ where: { entityId: base.id, name: CARD_NAME } })) {
+    console.log('  -> La tarjeta demo ya existe: no se modifica');
+    return;
+  }
+  const bank = await prisma.account.findFirst({ where: { entityId: base.id, type: 'BANK', archivedAt: null }, orderBy: { createdAt: 'asc' } });
+
+  async function category(name: string) {
+    const existing = await prisma.category.findFirst({ where: { entityId: base!.id, name, direction: 'OUT' } });
+    return existing?.id ?? (await prisma.category.create({ data: { entityId: base!.id, name, direction: 'OUT' } })).id;
+  }
+
+  const card = await prisma.$transaction(async (tx) => {
+    const c = await tx.account.create({
+      data: {
+        entityId: base.id,
+        name: CARD_NAME,
+        type: 'CREDIT_CARD',
+        institution: 'BAC Credomatic',
+        creditLimit: money(150000),
+        statementDay: 15,
+        paymentDueDay: 5,
+        defaultPaymentAccountId: bank?.id ?? null,
+      },
+    });
+    await createOpeningDebt(tx, c, 8500_00, today, userId);
+    return c;
+  });
+
+  await createCardCharge({
+    cardId: card.id,
+    purchaseDate: addDays(today, -20),
+    description: 'Licencias Adobe Creative Cloud',
+    amount: 12400_00,
+    installments: 1,
+    categoryId: await category('Software'),
+    counterpartyName: 'Adobe',
+    userId,
+  });
+  await createCardCharge({
+    cardId: card.id,
+    purchaseDate: addDays(today, -6),
+    description: 'Combustible flota',
+    amount: 4850_00,
+    installments: 1,
+    categoryId: await category('Combustible'),
+    counterpartyName: 'Texaco',
+    userId,
+  });
+  await createCardCharge({
+    cardId: card.id,
+    purchaseDate: addDays(today, -2),
+    description: 'Laptop para diseño (6 cuotas)',
+    amount: 36000_00,
+    installments: 6,
+    categoryId: await category('Equipo'),
+    counterpartyName: 'Jetstereo',
+    userId,
+  });
+  if (bank) {
+    await payCreditCard({ cardId: card.id, fromAccountId: bank.id, amount: 5000_00, date: today, note: 'Abono demo', userId });
+  }
+  console.log(`  -> Tarjeta demo creada: ${CARD_NAME}`);
 }
 
 main()

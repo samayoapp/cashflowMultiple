@@ -1,7 +1,7 @@
 'use client';
 
-import { useMemo, useState } from 'react';
-import { Ban, CalendarClock, CheckCircle2, Coins, Pencil, Plus, Search, Send, Trash2, X } from 'lucide-react';
+import { Fragment, useMemo, useState } from 'react';
+import { Ban, CalendarClock, CheckCircle2, ChevronDown, ChevronRight, Coins, CreditCard, Pencil, Plus, Search, Send, Trash2, X } from 'lucide-react';
 import { useApp } from '@/components/AppContext';
 import { Badge, Button, Card, cn, EmptyState, ErrorBox, Loading, Tabs, Toggle, useToast } from '@/components/ui';
 import { EntityDot } from '@/components/AppShell';
@@ -14,11 +14,13 @@ import {
   TransferFormModal,
 } from '@/components/forms';
 import { api, emitDataChanged, useApi } from '@/lib/client/api';
+import { CardChargeModal, CardPaymentModal, cardStatusBadge, type CardPaymentTarget } from '@/components/cards';
+import type { CardSummaryDto } from '@/lib/server/cards';
 import { formatMoney } from '@/lib/money';
 import { formatShortDate } from '@/lib/dates';
 import type { ObligationDto, RuleDto } from '@/lib/server/dto';
 
-type Tab = 'IN' | 'OUT' | 'rules' | 'transfers';
+type Tab = 'IN' | 'OUT' | 'cards' | 'rules' | 'transfers';
 
 export default function OperationsPage() {
   const [tab, setTab] = useState<Tab>('IN');
@@ -27,12 +29,13 @@ export default function OperationsPage() {
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold">Gestión operativa</h1>
-          <p className="text-sm text-slate-500">Cuentas por cobrar, por pagar, recurrencias y transferencias entre entidades.</p>
+          <p className="text-sm text-slate-500">Cuentas por cobrar, por pagar, tarjetas de crédito, recurrencias y transferencias entre entidades.</p>
         </div>
         <Tabs<Tab>
           tabs={[
             { id: 'IN', label: 'Por cobrar' },
             { id: 'OUT', label: 'Por pagar' },
+            { id: 'cards', label: 'Tarjetas' },
             { id: 'rules', label: 'Recurrentes' },
             { id: 'transfers', label: 'Transferencias' },
           ]}
@@ -41,6 +44,7 @@ export default function OperationsPage() {
         />
       </div>
       {(tab === 'IN' || tab === 'OUT') && <ObligationsTab key={tab} direction={tab} />}
+      {tab === 'cards' && <CardsTab />}
       {tab === 'rules' && <RulesTab />}
       {tab === 'transfers' && <TransfersTab />}
     </div>
@@ -67,6 +71,7 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
   const [form, setForm] = useState<{ open: boolean; ob: ObligationDto | null }>({ open: false, ob: null });
   const [pay, setPay] = useState<{ ob: ObligationDto; full: boolean } | null>(null);
   const [move, setMove] = useState<ObligationDto | null>(null);
+  const [charging, setCharging] = useState(false);
 
   const rows = useMemo(
     () =>
@@ -144,6 +149,11 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
               Pendiente: <strong className="tabular-nums text-slate-900 dark:text-white">{formatMoney(v, cur)}</strong>
             </span>
           ))}
+          {!isIn && (
+            <Button onClick={() => setCharging(true)}>
+              <CreditCard className="h-4 w-4" /> Gasto con tarjeta
+            </Button>
+          )}
           <Button variant="primary" onClick={() => setForm({ open: true, ob: null })}>
             <Plus className="h-4 w-4" /> {isIn ? 'Nueva CxC' : 'Nueva CxP'}
           </Button>
@@ -247,6 +257,7 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
       <ObligationFormModal open={form.open} onClose={() => setForm({ open: false, ob: null })} direction={direction} obligation={form.ob} hypothetical={app.whatIf} />
       <PaymentModal open={Boolean(pay)} onClose={() => setPay(null)} target={pay?.ob ?? null} full={pay?.full} />
       <RescheduleModal open={Boolean(move)} onClose={() => setMove(null)} target={move} />
+      {!isIn && <CardChargeModal open={charging} onClose={() => setCharging(false)} />}
     </Card>
   );
 }
@@ -441,5 +452,198 @@ function TransfersTab() {
       <TransferFormModal open={creating} onClose={() => setCreating(false)} />
       <ExecuteTransferModal open={Boolean(executing)} onClose={() => setExecuting(null)} transfer={executing} />
     </Card>
+  );
+}
+
+// ---------------------------------------------------------------- Tarjetas de crédito
+interface StatementItem {
+  installmentId: string;
+  description: string;
+  categoryName: string | null;
+  counterpartyName: string | null;
+  purchaseDate: string;
+  chargeAmount: number;
+  isOpening: boolean;
+  fromObligation: boolean;
+  number: number;
+  count: number;
+  amount: number;
+  pending: number;
+}
+
+function CardsTab() {
+  const app = useApp();
+  const { data, error, loading } = useApi<CardSummaryDto[]>(`/api/cards?ctx=${encodeURIComponent(app.ctx)}`);
+  const [charge, setCharge] = useState<{ cardId: string; entityId: string } | null>(null);
+  const [pay, setPay] = useState<CardPaymentTarget | null>(null);
+  const [showPaid, setShowPaid] = useState(false);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const toggle = (k: string) =>
+    setExpanded((prev) => {
+      const n = new Set(prev);
+      if (n.has(k)) n.delete(k);
+      else n.add(k);
+      return n;
+    });
+
+  const cards = (data ?? []).filter((c) => !c.archived);
+
+  if (error) return <ErrorBox message={error} />;
+  if (loading && !data) return <Loading />;
+  if (cards.length === 0)
+    return (
+      <Card>
+        <EmptyState title="Sin tarjetas de crédito">
+          Crea una en Configuración → Cuentas con el tipo &quot;Tarjeta de crédito&quot;, su día de corte y su día límite de pago.
+        </EmptyState>
+      </Card>
+    );
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm text-slate-500">
+          Los consumos no restan caja el día de la compra: se proyectan como un solo pago en la fecha límite de cada estado de cuenta.
+        </p>
+        <Toggle checked={showPaid} onChange={setShowPaid} label={<span className="text-sm">Mostrar estados pagados</span>} />
+      </div>
+      {cards.map((c) => {
+        const e = app.entityById.get(c.entityId);
+        const cur = e?.currency ?? 'HNL';
+        const usage = c.creditLimit ? Math.min(100, Math.round((c.debt / c.creditLimit) * 100)) : null;
+        const statements = c.statements.filter((s) => showPaid || s.status !== 'PAID');
+        return (
+          <Card key={c.id} className="p-0 sm:p-0">
+            <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 p-4 dark:border-slate-800">
+              <div>
+                <div className="flex items-center gap-2">
+                  {app.ctx === 'all' && e && <EntityDot color={e.color} />}
+                  <CreditCard className="h-4 w-4 text-slate-400" />
+                  <h3 className="font-semibold">{c.name}</h3>
+                  {c.institution && <span className="text-sm text-slate-500">{c.institution}</span>}
+                </div>
+                <p className="mt-0.5 text-xs text-slate-500">
+                  Corte día {c.statementDay} · pago día {c.paymentDueDay}
+                </p>
+              </div>
+              <div className="flex gap-2">
+                <Button onClick={() => setCharge({ cardId: c.id, entityId: c.entityId })}>
+                  <Plus className="h-4 w-4" /> Nuevo consumo
+                </Button>
+                <Button
+                  variant="primary"
+                  disabled={c.debt <= 0}
+                  onClick={() => setPay({ cardId: c.id, entityId: c.entityId, suggested: c.nextPayment?.pending })}
+                >
+                  <CreditCard className="h-4 w-4" /> Registrar pago
+                </Button>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4 p-4 lg:grid-cols-4">
+              <Stat label={`Consumo del ciclo${c.currentStatementDate ? ` (corte ${formatShortDate(c.currentStatementDate)})` : ''}`} value={formatMoney(c.currentCycle, cur)} />
+              <Stat label="Saldo total adeudado" value={formatMoney(c.debt, cur)} tone="red" sub={c.pendingInstallments !== c.debt ? `Cuotas por pagar: ${formatMoney(c.pendingInstallments, cur)}` : 'Incluye cuotas futuras'} />
+              <Stat
+                label="Próxima fecha de pago"
+                value={c.nextPayment ? formatShortDate(c.nextPayment.dueDate) : '—'}
+                sub={c.nextPayment ? formatMoney(c.nextPayment.pending, cur) : 'Sin pagos pendientes'}
+                tone={c.nextPayment && c.nextPayment.dueDate < app.today ? 'red' : undefined}
+              />
+              <Stat
+                label="Disponible"
+                value={c.available === null ? 'Sin límite' : formatMoney(c.available, cur)}
+                sub={usage === null ? undefined : `${usage}% usado de ${formatMoney(c.creditLimit!, cur)}`}
+                bar={usage}
+              />
+            </div>
+            {statements.length > 0 && (
+              <div className="overflow-x-auto border-t border-slate-200 dark:border-slate-800">
+                <table className="w-full">
+                  <thead className="bg-slate-50 dark:bg-slate-800/50">
+                    <tr>
+                      <th className="th">Estado de cuenta</th>
+                      <th className="th">Corte</th>
+                      <th className="th text-right">Total</th>
+                      <th className="th text-right">Pendiente</th>
+                      <th className="th">Estado</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {statements.map((s) => {
+                      const key = `${c.id}:${s.dueDate}`;
+                      const open = expanded.has(key);
+                      const st = cardStatusBadge[s.status];
+                      const items = s.items as StatementItem[];
+                      return (
+                        <Fragment key={key}>
+                          <tr className="cursor-pointer border-t border-slate-100 hover:bg-slate-50 dark:border-slate-800 dark:hover:bg-slate-800/40" onClick={() => toggle(key)}>
+                            <td className="td font-medium">
+                              <span className="inline-flex items-center gap-1">
+                                {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                                Pago {formatShortDate(s.dueDate)}
+                                <span className="text-xs font-normal text-slate-500">({items.length})</span>
+                              </span>
+                            </td>
+                            <td className="td text-slate-500">{formatShortDate(s.statementDate)}</td>
+                            <td className="td num">{formatMoney(s.total, cur)}</td>
+                            <td className="td num font-semibold text-rose-700 dark:text-rose-400">{formatMoney(s.pending, cur)}</td>
+                            <td className="td">
+                              <Badge tone={st.tone}>{st.label}</Badge>
+                            </td>
+                          </tr>
+                          {open &&
+                            items.map((i) => (
+                              <tr key={i.installmentId} className="border-t border-dashed border-slate-100 bg-slate-50/50 text-sm dark:border-slate-800 dark:bg-slate-800/20">
+                                <td className="td pl-10" colSpan={2}>
+                                  <div className="flex flex-wrap items-center gap-1.5">
+                                    <span>{i.description}</span>
+                                    {i.count > 1 && <Badge tone="blue">Cuota {i.number}/{i.count}</Badge>}
+                                    {i.isOpening && <Badge>Deuda inicial</Badge>}
+                                    {i.fromObligation && <Badge>Desde CxP</Badge>}
+                                  </div>
+                                  <div className="text-xs text-slate-500">
+                                    {formatShortDate(i.purchaseDate)}
+                                    {i.categoryName && ` · ${i.categoryName}`}
+                                    {i.counterpartyName && ` · ${i.counterpartyName}`}
+                                    {i.count > 1 && ` · compra total ${formatMoney(i.chargeAmount, cur)}`}
+                                  </div>
+                                </td>
+                                <td className="td num text-slate-500">{formatMoney(i.amount, cur)}</td>
+                                <td className="td num">{i.pending ? formatMoney(i.pending, cur) : '—'}</td>
+                                <td className="td" />
+                              </tr>
+                            ))}
+                        </Fragment>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {c.payments.length > 0 && (
+              <p className="border-t border-slate-200 px-4 py-2 text-xs text-slate-500 dark:border-slate-800">
+                Último pago: {formatShortDate(c.payments[0].date)} · {formatMoney(c.payments[0].amount, cur)} desde {c.payments[0].fromAccountName}
+              </p>
+            )}
+          </Card>
+        );
+      })}
+      <CardChargeModal open={Boolean(charge)} onClose={() => setCharge(null)} entityId={charge?.entityId} cardId={charge?.cardId} />
+      <CardPaymentModal open={Boolean(pay)} onClose={() => setPay(null)} target={pay} />
+    </div>
+  );
+}
+
+function Stat({ label, value, sub, tone, bar }: { label: string; value: string; sub?: string; tone?: 'red'; bar?: number | null }) {
+  return (
+    <div>
+      <p className="text-xs text-slate-500">{label}</p>
+      <p className={cn('text-lg font-semibold tabular-nums', tone === 'red' && 'text-rose-700 dark:text-rose-400')}>{value}</p>
+      {bar !== undefined && bar !== null && (
+        <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
+          <div className={cn('h-full rounded-full', bar >= 90 ? 'bg-rose-500' : bar >= 70 ? 'bg-amber-500' : 'bg-emerald-500')} style={{ width: `${bar}%` }} />
+        </div>
+      )}
+      {sub && <p className="mt-0.5 text-xs text-slate-500">{sub}</p>}
+    </div>
   );
 }

@@ -1,0 +1,120 @@
+import { addMonths, type ISODate } from '@/lib/dates';
+import type { Cents } from '@/lib/money';
+
+/**
+ * Ciclos de tarjeta de crédito (funciones puras).
+ *
+ *  - Corte (statementDay): día del mes en que cierra el estado de cuenta.
+ *  - Pago (paymentDueDay): día límite de pago, siempre POSTERIOR al corte.
+ *  - Días inexistentes (31 en febrero) se ajustan al último día del mes.
+ */
+export interface CardCycleConfig {
+  statementDay: number;
+  paymentDueDay: number;
+}
+
+export interface ScheduledInstallment {
+  number: number; // 1..N
+  count: number; // N
+  amount: Cents;
+  statementDate: ISODate;
+  dueDate: ISODate;
+}
+
+const firstOfMonth = (iso: ISODate): ISODate => iso.slice(0, 8) + '01';
+
+/** Fecha con el día `day` en el mes de `iso` desplazado `months` (ajustada a fin de mes). */
+export function dayInMonth(iso: ISODate, day: number, months = 0): ISODate {
+  return addMonths(firstOfMonth(iso), months, day);
+}
+
+/** Corte que cubre una compra: el del mismo mes si la compra es <= corte; si no, el siguiente. */
+export function statementCloseFor(purchase: ISODate, statementDay: number): ISODate {
+  const sameMonth = dayInMonth(purchase, statementDay);
+  return purchase <= sameMonth ? sameMonth : dayInMonth(purchase, statementDay, 1);
+}
+
+/** Primera fecha con día `paymentDueDay` estrictamente posterior al corte. */
+export function dueDateFor(statementDate: ISODate, paymentDueDay: number): ISODate {
+  const sameMonth = dayInMonth(statementDate, paymentDueDay);
+  return sameMonth > statementDate ? sameMonth : dayInMonth(statementDate, paymentDueDay, 1);
+}
+
+/** Corte cuyo pago vence en `dueDate` (inverso de dueDateFor). */
+export function statementForDueDate(dueDate: ISODate, card: CardCycleConfig): ISODate {
+  for (const months of [0, -1, -2]) {
+    const close = dayInMonth(dueDate, card.statementDay, months);
+    if (close < dueDate && dueDateFor(close, card.paymentDueDay) === dueDate) return close;
+  }
+  return dueDate;
+}
+
+/** Próxima fecha con día `day` a partir de `from` (inclusive). */
+export function nextDayOnOrAfter(from: ISODate, day: number): ISODate {
+  const sameMonth = dayInMonth(from, day);
+  return sameMonth >= from ? sameMonth : dayInMonth(from, day, 1);
+}
+
+/** Fecha límite de pago en la que impacta una compra hecha en `purchase`. */
+export function paymentDateForPurchase(purchase: ISODate, card: CardCycleConfig): ISODate {
+  return dueDateFor(statementCloseFor(purchase, card.statementDay), card.paymentDueDay);
+}
+
+/** Divide en N cuotas exactas: los centavos sobrantes van en las primeras. */
+export function splitInstallments(total: Cents, n: number): Cents[] {
+  if (!Number.isInteger(n) || n < 1) throw new Error('Número de cuotas inválido');
+  if (!Number.isInteger(total) || total <= 0) throw new Error('Monto inválido');
+  const base = Math.floor(total / n);
+  const rest = total - base * n;
+  return Array.from({ length: n }, (_, i) => base + (i < rest ? 1 : 0));
+}
+
+/** Calendario de cuotas: la cuota k cae en el k-ésimo corte desde el de la compra. */
+export function buildSchedule(purchase: ISODate, total: Cents, n: number, card: CardCycleConfig): ScheduledInstallment[] {
+  const firstClose = statementCloseFor(purchase, card.statementDay);
+  return splitInstallments(total, n).map((amount, i) => {
+    const statementDate = dayInMonth(firstClose, card.statementDay, i);
+    return { number: i + 1, count: n, amount, statementDate, dueDate: dueDateFor(statementDate, card.paymentDueDay) };
+  });
+}
+
+export interface PendingInstallment {
+  id: string;
+  dueDate: ISODate;
+  number: number;
+  pending: Cents;
+  purchaseDate?: ISODate;
+}
+
+/**
+ * Reparte un pago entre cuotas pendientes en orden FIFO (fecha de pago, compra, número de cuota).
+ * `rest` = parte del pago que no cubrió cuotas (p. ej. intereses ajustados por conciliación).
+ */
+export function allocatePayment(
+  installments: PendingInstallment[],
+  amount: Cents,
+): { allocations: { installmentId: string; amount: Cents }[]; rest: Cents } {
+  const sorted = installments
+    .filter((i) => i.pending > 0)
+    .slice()
+    .sort((a, b) =>
+      a.dueDate !== b.dueDate
+        ? a.dueDate < b.dueDate
+          ? -1
+          : 1
+        : (a.purchaseDate ?? '') !== (b.purchaseDate ?? '')
+          ? (a.purchaseDate ?? '') < (b.purchaseDate ?? '')
+            ? -1
+            : 1
+          : a.number - b.number,
+    );
+  const allocations: { installmentId: string; amount: Cents }[] = [];
+  let left = amount;
+  for (const inst of sorted) {
+    if (left <= 0) break;
+    const take = Math.min(left, inst.pending);
+    allocations.push({ installmentId: inst.id, amount: take });
+    left -= take;
+  }
+  return { allocations, rest: left };
+}

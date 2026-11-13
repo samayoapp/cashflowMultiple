@@ -26,6 +26,8 @@ import type {
  *  - What-If apagado: se ignoran hipotéticas y overrides.
  *  - Recurrencias: ocurrencias virtuales desde hoy; las ya materializadas
  *    (Obligation con recurrenceId + occurrenceDate) reemplazan a la virtual.
+ *  - Tarjetas de crédito (cuenta puente): su saldo NO suma a la caja real; las cuotas
+ *    pendientes salen como un solo "Pago Tarjeta" en su fecha límite de pago.
  */
 export function project(input: ProjectionInput): ProjectionResult {
   const weeksCount = input.weeks ?? 13;
@@ -141,22 +143,93 @@ export function project(input: ProjectionInput): ProjectionResult {
     }
   }
 
+  // 3. Estados de cuenta de tarjetas: cuotas pendientes agrupadas por (tarjeta, fecha límite)
+  const statements = new Map<string, ProjectedItem>();
+  for (const ci of input.cardInstallments ?? []) {
+    const entity = entities.get(ci.entityId);
+    if (!entity) continue;
+    const pending = ci.amount - ci.settled;
+    if (pending <= 0) continue;
+    const overdue = ci.dueDate < today;
+    const date = overdue ? today : ci.dueDate;
+    if (date > horizonEnd) continue;
+    const key = `card:${ci.cardAccountId}:${ci.dueDate}`;
+    let st = statements.get(key);
+    if (!st) {
+      st = {
+        key,
+        source: 'CARD_STATEMENT',
+        obligationId: null,
+        ruleId: null,
+        entityId: ci.entityId,
+        direction: 'OUT',
+        description: `Pago Tarjeta: ${ci.cardName}`,
+        counterpartyName: null,
+        categoryName: null,
+        amount: 0,
+        amountNative: 0,
+        nativeCurrency: entity.currency,
+        date,
+        expectedDate: ci.dueDate,
+        dueDate: ci.dueDate,
+        overdue,
+        priority: 'FIXED',
+        isHypothetical: false,
+        simulated: false,
+        transferId: null,
+        status: 'OPEN',
+        weekIndex: weekIndexOf(date),
+        cardAccountId: ci.cardAccountId,
+        cardDetails: [],
+      };
+      statements.set(key, st);
+    }
+    st.amountNative += pending;
+    st.cardDetails!.push({
+      installmentId: ci.id,
+      chargeId: ci.chargeId,
+      description: ci.description,
+      categoryName: ci.categoryName ?? null,
+      counterpartyName: ci.counterpartyName ?? null,
+      purchaseDate: ci.purchaseDate,
+      number: ci.number,
+      count: ci.count,
+      pendingNative: pending,
+    });
+  }
+  statements.forEach((st) => {
+    // Se convierte el total del estado (no cada cuota) para no acumular redondeos
+    const amount = toOut(st.amountNative, st.entityId);
+    if (amount === null) return;
+    st.amount = amount;
+    st.cardDetails!.sort((a, b) => (a.purchaseDate === b.purchaseDate ? a.number - b.number : a.purchaseDate < b.purchaseDate ? -1 : 1));
+    items.push(st);
+  });
+
   items.sort((a, b) =>
     a.date === b.date ? (a.direction === b.direction ? b.amount - a.amount : a.direction === 'IN' ? -1 : 1) : a.date < b.date ? -1 : 1,
   );
 
-  // 3. Caja real hoy (por entidad y total)
+  // 4. Caja real hoy (solo cuentas líquidas) y deuda flotante en tarjetas
   const cashByEntity = new Map<string, Cents>();
+  const debtByEntity = new Map<string, Cents>();
   for (const b of input.balances) {
     if (!entities.has(b.entityId)) continue;
     const v = toOut(b.balance, b.entityId);
     if (v === null) continue;
+    if (b.kind === 'CREDIT_CARD') {
+      // saldo negativo = deuda; un saldo a favor no se cuenta como caja
+      if (v < 0) debtByEntity.set(b.entityId, (debtByEntity.get(b.entityId) ?? 0) - v);
+      continue;
+    }
     cashByEntity.set(b.entityId, (cashByEntity.get(b.entityId) ?? 0) + v);
   }
   let cashToday = 0;
   cashByEntity.forEach((v) => (cashToday += v));
+  let cardDebt = 0;
+  debtByEntity.forEach((v) => (cardDebt += v));
 
-  // 4. Buckets semanales
+  // 5. Buckets semanales
   const weeks: WeekBucket[] = [];
   let running = cashToday;
   for (let i = 0; i < weeksCount; i++) {
@@ -192,7 +265,7 @@ export function project(input: ProjectionInput): ProjectionResult {
     running = w.closing;
   }
 
-  // 5. Serie diaria (hoy .. hoy + días - 1)
+  // 6. Serie diaria (hoy .. hoy + días - 1)
   const dayIndex = new Map<string, { inflows: Cents; outflows: Cents }>();
   for (const it of items) {
     if (it.date > daysEnd) continue;
@@ -215,7 +288,7 @@ export function project(input: ProjectionInput): ProjectionResult {
   }
   if (!Number.isFinite(lowPoint.balance)) lowPoint = { date: today, balance: cashToday };
 
-  // 6. KPIs
+  // 7. KPIs
   const in30End = addDays(today, 29);
   let inflows30 = 0;
   let outflows30 = 0;
@@ -235,7 +308,7 @@ export function project(input: ProjectionInput): ProjectionResult {
   const runwayDays =
     cashToday <= 0 ? 0 : outflowsWindow > 0 ? Math.floor((cashToday * daysCount) / outflowsWindow) : null;
 
-  // 7. Desglose por entidad
+  // 8. Desglose por entidad
   const byEntity: EntityBreakdown[] = input.entities.map((e) => {
     let inflows13w = 0;
     let outflows13w = 0;
@@ -246,7 +319,13 @@ export function project(input: ProjectionInput): ProjectionResult {
         outflows13w += f.outflows;
       }
     }
-    return { entityId: e.id, cash: cashByEntity.get(e.id) ?? 0, inflows13w, outflows13w };
+    return {
+      entityId: e.id,
+      cash: cashByEntity.get(e.id) ?? 0,
+      cardDebt: debtByEntity.get(e.id) ?? 0,
+      inflows13w,
+      outflows13w,
+    };
   });
 
   return {
@@ -260,6 +339,7 @@ export function project(input: ProjectionInput): ProjectionResult {
     byEntity,
     kpis: {
       cashToday,
+      cardDebt,
       net30: inflows30 - outflows30,
       inflows30,
       outflows30,

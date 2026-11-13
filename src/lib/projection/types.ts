@@ -19,6 +19,40 @@ export interface EngineAccountBalance {
   accountId: string;
   entityId: string;
   balance: Cents;
+  /** Sin valor = cuenta líquida. Las tarjetas no suman a la caja real (saldo negativo = deuda). */
+  kind?: 'LIQUID' | 'CREDIT_CARD';
+}
+
+/** Cuota pendiente de un consumo con tarjeta, asignada a su fecha límite de pago. */
+export interface EngineCardInstallment {
+  id: string;
+  chargeId: string;
+  entityId: string;
+  cardAccountId: string;
+  cardName: string;
+  description: string;
+  categoryName?: string | null;
+  counterpartyName?: string | null;
+  purchaseDate: ISODate;
+  number: number;
+  count: number;
+  amount: Cents;
+  settled: Cents;
+  statementDate: ISODate;
+  dueDate: ISODate;
+}
+
+export interface CardStatementDetail {
+  installmentId: string;
+  chargeId: string;
+  description: string;
+  categoryName: string | null;
+  counterpartyName: string | null;
+  purchaseDate: ISODate;
+  number: number;
+  count: number;
+  /** Pendiente en moneda de la entidad. */
+  pendingNative: Cents;
 }
 
 export interface EngineObligation {
@@ -79,6 +113,8 @@ export interface ProjectionInput {
   rules: EngineRule[];
   overrides: EngineOverride[];
   rates: EngineRate[];
+  /** Cuotas pendientes de tarjetas; se agrupan como "Pago Tarjeta" en su fecha límite. */
+  cardInstallments?: EngineCardInstallment[];
   /** Moneda de salida. En vista consolidada: moneda de reporte; en una entidad: su moneda. */
   outputCurrency: string;
   /** true = vista "Todas las Entidades": netea transferencias inter-entidad. */
@@ -89,8 +125,8 @@ export interface ProjectionInput {
 }
 
 export interface ProjectedItem {
-  key: string; // único: obligationId o `rule:<id>:<fecha>`
-  source: 'OBLIGATION' | 'RECURRENCE';
+  key: string; // único: obligationId, `rule:<id>:<fecha>` o `card:<cuenta>:<fecha>`
+  source: 'OBLIGATION' | 'RECURRENCE' | 'CARD_STATEMENT';
   obligationId: string | null;
   ruleId: string | null;
   entityId: string;
@@ -115,6 +151,9 @@ export interface ProjectedItem {
   transferId: string | null;
   status: ObligationStatus | 'PROJECTED';
   weekIndex: number | null; // null = fuera de las 13 semanas
+  /** Solo CARD_STATEMENT: tarjeta y consumos/cuotas que forman el pago. */
+  cardAccountId?: string;
+  cardDetails?: CardStatementDetail[];
 }
 
 export interface EntityFlow {
@@ -143,13 +182,17 @@ export interface DailyPoint {
 
 export interface EntityBreakdown {
   entityId: string;
-  cash: Cents; // en moneda de salida
+  cash: Cents; // en moneda de salida (solo cuentas líquidas)
+  cardDebt: Cents; // deuda flotante en tarjetas (positivo)
   inflows13w: Cents;
   outflows13w: Cents;
 }
 
 export interface ProjectionKpis {
+  /** Solo cuentas líquidas (bancos, efectivo, billeteras). */
   cashToday: Cents;
+  /** Deuda flotante en tarjetas de crédito (positivo, informativo). */
+  cardDebt: Cents;
   net30: Cents;
   inflows30: Cents;
   outflows30: Cents;

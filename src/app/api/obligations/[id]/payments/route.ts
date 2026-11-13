@@ -18,6 +18,8 @@ const schema = z.object({
   amount: positiveMoney.optional(),
   date: isoDate.optional(),
   note: optionalText(300),
+  /** Solo al pagar con tarjeta de crédito: cuotas (1..36). */
+  installments: z.coerce.number().int().min(1).max(36).optional(),
 });
 
 export const POST = route<{ params: { id: string } }>(async (req, { params }) => {
@@ -35,6 +37,7 @@ export const POST = route<{ params: { id: string } }>(async (req, { params }) =>
     amount: data.amount ?? remaining,
     date: data.date ?? todayInTz(settings.timezone),
     note: data.note,
+    installments: data.installments,
     userId: user.id,
   });
   const updated = await prisma.obligation.findUniqueOrThrow({ where: { id: o.id }, include: obligationInclude });

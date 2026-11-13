@@ -90,7 +90,20 @@ export default function DashboardPage() {
       )}
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <Kpi title="Caja real hoy" value={money(kpis.cashToday)} sub="Saldo disponible en cuentas" icon={<Landmark className="h-5 w-5" />} />
+        <Kpi
+          title="Caja real hoy"
+          value={money(kpis.cashToday)}
+          sub={
+            kpis.cardDebt > 0 ? (
+              <>
+                Bancos, efectivo y billeteras · <span className="text-rose-600 dark:text-rose-400">Deuda flotante en tarjetas: {money(kpis.cardDebt)}</span>
+              </>
+            ) : (
+              'Bancos, efectivo y billeteras'
+            )
+          }
+          icon={<Landmark className="h-5 w-5" />}
+        />
         <Kpi
           title="Flujo neto 30 días"
           value={money(kpis.net30)}
@@ -188,6 +201,9 @@ export default function DashboardPage() {
                   <p className="mt-1 text-xs text-slate-500">
                     13 sem.: +{formatMoney(b.inflows13w, currency, { compact: true })} / −
                     {formatMoney(b.outflows13w, currency, { compact: true })}
+                    {b.cardDebt > 0 && (
+                      <span className="text-rose-600 dark:text-rose-400"> · tarjetas: {formatMoney(b.cardDebt, currency, { compact: true })}</span>
+                    )}
                   </p>
                 </div>
               );
@@ -244,7 +260,7 @@ function RadarList({
                 <div className="min-w-0 flex-1 basis-40">
                   <p className="truncate text-sm font-medium">{i.description}</p>
                   <p className="truncate text-xs text-slate-500">
-                    {i.counterpartyName ?? '—'} · esperado {formatShortDate(i.expectedDate)}
+                    {i.cardDetails ? `${i.cardDetails.length} consumo(s) · fecha límite` : (i.counterpartyName ?? '—')} · esperado {formatShortDate(i.expectedDate)}
                     {i.overdue && <span className="ml-1 font-medium text-rose-600">· vencido</span>}
                   </p>
                 </div>

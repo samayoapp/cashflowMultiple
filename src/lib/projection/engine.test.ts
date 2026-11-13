@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { project } from './engine';
 import { expandRule } from './recurrence';
 import { CurrencyConverter } from './currency';
-import type { EngineEntity, EngineObligation, EngineRule, ProjectionInput } from './types';
+import type { EngineCardInstallment, EngineEntity, EngineObligation, EngineRule, ProjectionInput } from './types';
 import { centsToDecimalString, toCents } from '@/lib/money';
 import { addMonths, startOfWeek } from '@/lib/dates';
 
@@ -286,5 +286,79 @@ describe('recurrencias', () => {
   it('respeta endDate y reglas inactivas', () => {
     expect(expandRule({ ...rule, endDate: '2026-11-20' }, '2026-11-12', '2026-12-31')).toEqual(['2026-11-13']);
     expect(expandRule({ ...rule, active: false }, '2026-11-12', '2026-12-31')).toEqual([]);
+  });
+});
+
+describe('tarjetas de crédito (cuenta puente)', () => {
+  const inst = (p: Partial<EngineCardInstallment> & { id: string }): EngineCardInstallment => ({
+    chargeId: 'ch-' + p.id,
+    entityId: 'A',
+    cardAccountId: 'visa',
+    cardName: 'Visa',
+    description: p.id,
+    purchaseDate: '2026-11-01',
+    number: 1,
+    count: 1,
+    amount: 1000_00,
+    settled: 0,
+    statementDate: '2026-11-15',
+    dueDate: '2026-12-05',
+    ...p,
+  });
+
+  it('el saldo de la tarjeta no suma a la caja real y se reporta como deuda flotante', () => {
+    const r = project(
+      input({
+        balances: [
+          { accountId: 'acc1', entityId: 'A', balance: 50_000_00 },
+          { accountId: 'visa', entityId: 'A', balance: -3_000_00, kind: 'CREDIT_CARD' },
+        ],
+      }),
+    );
+    expect(r.kpis.cashToday).toBe(50_000_00);
+    expect(r.kpis.cardDebt).toBe(3_000_00);
+    expect(r.byEntity[0]).toMatchObject({ cash: 50_000_00, cardDebt: 3_000_00 });
+  });
+
+  it('agrupa las cuotas pendientes en un solo pago en la fecha límite', () => {
+    const r = project(
+      input({
+        cardInstallments: [
+          inst({ id: 'software', amount: 1000_00, categoryName: 'Software' }),
+          inst({ id: 'combustible', amount: 500_00, settled: 200_00 }),
+          inst({ id: 'cuota2', number: 2, count: 6, dueDate: '2027-01-05' }),
+          inst({ id: 'pagada', amount: 400_00, settled: 400_00 }),
+        ],
+      }),
+    );
+    const cards = r.items.filter((i) => i.source === 'CARD_STATEMENT');
+    expect(cards).toHaveLength(2);
+    const dec = cards.find((c) => c.dueDate === '2026-12-05')!;
+    expect(dec).toMatchObject({ description: 'Pago Tarjeta: Visa', amount: 1300_00, direction: 'OUT', date: '2026-12-05' });
+    expect(dec.cardDetails!.map((d) => d.pendingNative)).toEqual([1000_00, 300_00]);
+    expect(dec.cardDetails![0].categoryName).toBe('Software');
+    // La compra no afecta la caja de hoy: el desfase se ve en la semana del pago
+    expect(r.kpis.cashToday).toBe(50_000_00);
+    expect(r.weeks[dec.weekIndex!].outflows).toBe(1300_00);
+    expect(r.weeks[0].outflows).toBe(0);
+  });
+
+  it('un estado de cuenta vencido se arrastra a hoy', () => {
+    const r = project(input({ cardInstallments: [inst({ id: 'v', dueDate: '2026-11-05' })] }));
+    const it0 = r.items.find((i) => i.source === 'CARD_STATEMENT')!;
+    expect(it0).toMatchObject({ date: TODAY, overdue: true, dueDate: '2026-11-05' });
+  });
+
+  it('se incluye en la vista consolidada y se convierte a la moneda de reporte', () => {
+    const r = project(
+      input({
+        entities: [A, B],
+        consolidated: true,
+        cardInstallments: [inst({ id: 'usd', entityId: 'B', amount: 100_00 })],
+      }),
+    );
+    const it0 = r.items.find((i) => i.source === 'CARD_STATEMENT')!;
+    expect(it0.amount).toBe(2500_00);
+    expect(it0.amountNative).toBe(100_00);
   });
 });

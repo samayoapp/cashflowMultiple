@@ -26,7 +26,12 @@ export function accountDto(a: Account, balance: number) {
     type: a.type,
     institution: a.institution,
     archived: Boolean(a.archivedAt),
+    /** En tarjetas: negativo = deuda. */
     balance,
+    creditLimit: a.creditLimit ? cents(a.creditLimit) : null,
+    statementDay: a.statementDay,
+    paymentDueDay: a.paymentDueDay,
+    defaultPaymentAccountId: a.defaultPaymentAccountId,
   };
 }
 export type AccountDto = ReturnType<typeof accountDto>;

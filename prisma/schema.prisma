@@ -21,6 +21,7 @@ enum AccountType {
   BANK
   CASH
   WALLET
+  CREDIT_CARD
 }
 
 enum Direction {
@@ -52,6 +53,7 @@ enum MovementType {
   PAYMENT
   ADJUSTMENT
   TRANSFER
+  CARD_PAYMENT
 }
 
 enum TransferKind {
@@ -107,28 +109,31 @@ model AppSetting {
 }
 
 model Entity {
-  id                String    @id @default(uuid())
-  name              String
-  currency          String    @default("HNL")
-  color             String    @default("#10b981")
-  minCashThreshold  Decimal   @default(0) @db.Decimal(18, 2)
-  isDefault         Boolean   @default(false)
-  archivedAt        DateTime?
-  webhookTokenHash  String?   @unique
-  webhookTokenHint  String?
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
+  id               String    @id @default(uuid())
+  name             String
+  currency         String    @default("HNL")
+  color            String    @default("#10b981")
+  minCashThreshold Decimal   @default(0) @db.Decimal(18, 2)
+  isDefault        Boolean   @default(false)
+  archivedAt       DateTime?
+  webhookTokenHash String?   @unique
+  webhookTokenHint String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
-  userAccess     UserEntityAccess[]
-  accounts       Account[]
-  counterparties Counterparty[]
-  categories     Category[]
-  obligations    Obligation[]
-  movements      CashMovement[]
-  recurringRules RecurringRule[]
-  stagingItems   StagingItem[]
-  transfersOut   InterEntityTransfer[] @relation("TransferFrom")
-  transfersIn    InterEntityTransfer[] @relation("TransferTo")
+  userAccess       UserEntityAccess[]
+  accounts         Account[]
+  counterparties   Counterparty[]
+  categories       Category[]
+  obligations      Obligation[]
+  movements        CashMovement[]
+  recurringRules   RecurringRule[]
+  stagingItems     StagingItem[]
+  transfersOut     InterEntityTransfer[] @relation("TransferFrom")
+  transfersIn      InterEntityTransfer[] @relation("TransferTo")
+  cardCharges      CardCharge[]
+  cardInstallments CardInstallment[]
+  cardPayments     CardPayment[]
 }
 
 model ExchangeRate {
@@ -143,36 +148,50 @@ model ExchangeRate {
 }
 
 model Account {
-  id             String         @id @default(uuid())
-  entityId       String
-  name           String
-  type           AccountType    @default(BANK)
-  institution    String?
-  archivedAt     DateTime?
-  createdAt      DateTime       @default(now())
-  updatedAt      DateTime       @updatedAt
-  entity         Entity         @relation(fields: [entityId], references: [id], onDelete: Restrict)
-  movements      CashMovement[]
-  payments       Payment[]
+  id                      String            @id @default(uuid())
+  entityId                String
+  name                    String
+  type                    AccountType       @default(BANK)
+  institution             String?
+  archivedAt              DateTime?
+  // Solo tarjetas de crédito (CREDIT_CARD)
+  creditLimit             Decimal?          @db.Decimal(18, 2)
+  statementDay            Int?
+  paymentDueDay           Int?
+  defaultPaymentAccountId String?
+  createdAt               DateTime          @default(now())
+  updatedAt               DateTime          @updatedAt
+  entity                  Entity            @relation(fields: [entityId], references: [id], onDelete: Restrict)
+  movements               CashMovement[]
+  payments                Payment[]
+  defaultPaymentAccount   Account?          @relation("CardDefaultPayment", fields: [defaultPaymentAccountId], references: [id], onDelete: SetNull)
+  paysCards               Account[]         @relation("CardDefaultPayment")
+  cardCharges             CardCharge[]
+  cardInstallments        CardInstallment[]
+  cardPayments            CardPayment[]     @relation("CardPaymentCard")
+  cardPaymentsFrom        CardPayment[]     @relation("CardPaymentFrom")
 
   @@index([entityId])
 }
 
 model CashMovement {
-  id          String       @id @default(uuid())
-  entityId    String
-  accountId   String
-  type        MovementType
-  amount      Decimal      @db.Decimal(18, 2) // con signo: + entra, - sale
-  date        DateTime     @db.Date
-  description String?
-  transferId  String?
-  createdById String?
-  createdAt   DateTime     @default(now())
-  entity      Entity       @relation(fields: [entityId], references: [id], onDelete: Restrict)
-  account     Account      @relation(fields: [accountId], references: [id], onDelete: Restrict)
-  transfer    InterEntityTransfer? @relation(fields: [transferId], references: [id], onDelete: SetNull)
-  payment     Payment?
+  id              String               @id @default(uuid())
+  entityId        String
+  accountId       String
+  type            MovementType
+  amount          Decimal              @db.Decimal(18, 2) // con signo: + entra, - sale
+  date            DateTime             @db.Date
+  description     String?
+  transferId      String?
+  createdById     String?
+  createdAt       DateTime             @default(now())
+  entity          Entity               @relation(fields: [entityId], references: [id], onDelete: Restrict)
+  account         Account              @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  transfer        InterEntityTransfer? @relation(fields: [transferId], references: [id], onDelete: SetNull)
+  payment         Payment?
+  cardCharge      CardCharge?
+  cardPaymentBank CardPayment?         @relation("CardPaymentBankMovement")
+  cardPaymentCard CardPayment?         @relation("CardPaymentCardMovement")
 
   @@index([entityId, date])
   @@index([accountId])
@@ -189,6 +208,7 @@ model Counterparty {
   entity      Entity           @relation(fields: [entityId], references: [id], onDelete: Restrict)
   obligations Obligation[]
   rules       RecurringRule[]
+  cardCharges CardCharge[]
 
   @@index([entityId])
 }
@@ -203,38 +223,40 @@ model Category {
   entity      Entity          @relation(fields: [entityId], references: [id], onDelete: Restrict)
   obligations Obligation[]
   rules       RecurringRule[]
+  cardCharges CardCharge[]
 
   @@index([entityId])
 }
 
 model Obligation {
-  id             String           @id @default(uuid())
+  id             String               @id @default(uuid())
   entityId       String
   direction      Direction
   description    String
-  amount         Decimal          @db.Decimal(18, 2)
-  dueDate        DateTime         @db.Date
-  expectedDate   DateTime         @db.Date
-  status         ObligationStatus @default(OPEN)
-  priority       Priority         @default(FLEXIBLE)
-  isHypothetical Boolean          @default(false)
+  amount         Decimal              @db.Decimal(18, 2)
+  dueDate        DateTime             @db.Date
+  expectedDate   DateTime             @db.Date
+  status         ObligationStatus     @default(OPEN)
+  priority       Priority             @default(FLEXIBLE)
+  isHypothetical Boolean              @default(false)
   counterpartyId String?
   categoryId     String?
   recurrenceId   String?
-  occurrenceDate DateTime?        @db.Date
+  occurrenceDate DateTime?            @db.Date
   transferId     String?
-  stagingItemId  String?          @unique
+  stagingItemId  String?              @unique
   notes          String?
   createdById    String?
-  createdAt      DateTime         @default(now())
-  updatedAt      DateTime         @updatedAt
-  entity         Entity           @relation(fields: [entityId], references: [id], onDelete: Restrict)
-  counterparty   Counterparty?    @relation(fields: [counterpartyId], references: [id], onDelete: SetNull)
-  category       Category?        @relation(fields: [categoryId], references: [id], onDelete: SetNull)
-  recurrence     RecurringRule?   @relation(fields: [recurrenceId], references: [id], onDelete: SetNull)
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+  entity         Entity               @relation(fields: [entityId], references: [id], onDelete: Restrict)
+  counterparty   Counterparty?        @relation(fields: [counterpartyId], references: [id], onDelete: SetNull)
+  category       Category?            @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  recurrence     RecurringRule?       @relation(fields: [recurrenceId], references: [id], onDelete: SetNull)
   transfer       InterEntityTransfer? @relation(fields: [transferId], references: [id], onDelete: Cascade)
   payments       Payment[]
   overrides      ScenarioOverride[]
+  cardCharge     CardCharge?
 
   @@unique([recurrenceId, occurrenceDate])
   @@index([entityId, status, expectedDate])
@@ -282,25 +304,25 @@ model RecurringRule {
 }
 
 model InterEntityTransfer {
-  id             String         @id @default(uuid())
-  kind           TransferKind   @default(TRANSFER)
-  status         TransferStatus @default(PLANNED)
-  fromEntityId   String
-  toEntityId     String
-  fromAccountId  String?
-  toAccountId    String?
-  amountFrom     Decimal        @db.Decimal(18, 2)
-  amountTo       Decimal        @db.Decimal(18, 2)
-  expectedDate   DateTime       @db.Date
-  executedDate   DateTime?      @db.Date
-  description    String?
-  createdById    String?
-  createdAt      DateTime       @default(now())
-  updatedAt      DateTime       @updatedAt
-  fromEntity     Entity         @relation("TransferFrom", fields: [fromEntityId], references: [id], onDelete: Restrict)
-  toEntity       Entity         @relation("TransferTo", fields: [toEntityId], references: [id], onDelete: Restrict)
-  obligations    Obligation[]
-  movements      CashMovement[]
+  id            String         @id @default(uuid())
+  kind          TransferKind   @default(TRANSFER)
+  status        TransferStatus @default(PLANNED)
+  fromEntityId  String
+  toEntityId    String
+  fromAccountId String?
+  toAccountId   String?
+  amountFrom    Decimal        @db.Decimal(18, 2)
+  amountTo      Decimal        @db.Decimal(18, 2)
+  expectedDate  DateTime       @db.Date
+  executedDate  DateTime?      @db.Date
+  description   String?
+  createdById   String?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  fromEntity    Entity         @relation("TransferFrom", fields: [fromEntityId], references: [id], onDelete: Restrict)
+  toEntity      Entity         @relation("TransferTo", fields: [toEntityId], references: [id], onDelete: Restrict)
+  obligations   Obligation[]
+  movements     CashMovement[]
 
   @@index([fromEntityId])
   @@index([toEntityId])
@@ -349,4 +371,87 @@ model StagingItem {
 
   @@unique([entityId, source, externalId])
   @@index([entityId, status])
+}
+
+// ---- Tarjetas de crédito (cuenta puente) ----
+
+model CardCharge {
+  id              String            @id @default(uuid())
+  entityId        String
+  cardAccountId   String
+  purchaseDate    DateTime          @db.Date
+  description     String
+  amount          Decimal           @db.Decimal(18, 2)
+  installments    Int               @default(1)
+  categoryId      String?
+  counterpartyId  String?
+  obligationId    String?           @unique
+  movementId      String            @unique
+  isOpening       Boolean           @default(false)
+  createdById     String?
+  createdAt       DateTime          @default(now())
+  entity          Entity            @relation(fields: [entityId], references: [id], onDelete: Restrict)
+  card            Account           @relation(fields: [cardAccountId], references: [id], onDelete: Restrict)
+  category        Category?         @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  counterparty    Counterparty?     @relation(fields: [counterpartyId], references: [id], onDelete: SetNull)
+  obligation      Obligation?       @relation(fields: [obligationId], references: [id], onDelete: SetNull)
+  movement        CashMovement      @relation(fields: [movementId], references: [id], onDelete: Restrict)
+  installmentRows CardInstallment[]
+
+  @@index([entityId])
+  @@index([cardAccountId, purchaseDate])
+}
+
+model CardInstallment {
+  id            String                  @id @default(uuid())
+  chargeId      String
+  entityId      String
+  cardAccountId String
+  number        Int
+  count         Int
+  amount        Decimal                 @db.Decimal(18, 2)
+  settledAmount Decimal                 @default(0) @db.Decimal(18, 2)
+  statementDate DateTime                @db.Date
+  dueDate       DateTime                @db.Date
+  charge        CardCharge              @relation(fields: [chargeId], references: [id], onDelete: Restrict)
+  entity        Entity                  @relation(fields: [entityId], references: [id], onDelete: Restrict)
+  card          Account                 @relation(fields: [cardAccountId], references: [id], onDelete: Restrict)
+  allocations   CardPaymentAllocation[]
+
+  @@index([cardAccountId, dueDate])
+  @@index([entityId])
+  @@index([chargeId])
+}
+
+model CardPayment {
+  id             String                  @id @default(uuid())
+  entityId       String
+  cardAccountId  String
+  fromAccountId  String
+  amount         Decimal                 @db.Decimal(18, 2)
+  date           DateTime                @db.Date
+  bankMovementId String                  @unique
+  cardMovementId String                  @unique
+  note           String?
+  createdById    String?
+  createdAt      DateTime                @default(now())
+  entity         Entity                  @relation(fields: [entityId], references: [id], onDelete: Restrict)
+  card           Account                 @relation("CardPaymentCard", fields: [cardAccountId], references: [id], onDelete: Restrict)
+  fromAccount    Account                 @relation("CardPaymentFrom", fields: [fromAccountId], references: [id], onDelete: Restrict)
+  bankMovement   CashMovement            @relation("CardPaymentBankMovement", fields: [bankMovementId], references: [id], onDelete: Restrict)
+  cardMovement   CashMovement            @relation("CardPaymentCardMovement", fields: [cardMovementId], references: [id], onDelete: Restrict)
+  allocations    CardPaymentAllocation[]
+
+  @@index([cardAccountId])
+}
+
+model CardPaymentAllocation {
+  paymentId     String
+  installmentId String
+  amount        Decimal         @db.Decimal(18, 2)
+  payment       CardPayment     @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  installment   CardInstallment @relation(fields: [installmentId], references: [id], onDelete: Restrict)
+
+  @@id([paymentId, installmentId])
+  @@index([installmentId])
 }

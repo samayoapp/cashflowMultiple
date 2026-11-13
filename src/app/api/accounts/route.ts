@@ -1,12 +1,14 @@
 import { z } from 'zod';
 import { prisma } from '@/lib/server/db';
-import { ok, readJson, route } from '@/lib/server/api';
+import { badRequest, ok, readJson, route } from '@/lib/server/api';
 import { requireUser } from '@/lib/server/auth';
 import { assertEntityAccess, resolveContext } from '@/lib/server/scope';
 import { accountDto } from '@/lib/server/dto';
 import { dbDate, dec } from '@/lib/server/serialize';
 import { getAccountBalances, getSettings } from '@/lib/server/projection-data';
 import { id, isoDate, money, optionalText, shortText } from '@/lib/validation';
+import { accountType, assertPaymentAccount, cardFields, refineCard } from '@/lib/server/account-validation';
+import { createOpeningDebt } from '@/lib/server/cards';
 import { todayInTz } from '@/lib/dates';
 
 export const dynamic = 'force-dynamic';
@@ -26,14 +28,18 @@ export const GET = route(async (req) => {
   return ok(accounts.map((a) => accountDto(a, byId.get(a.id) ?? 0)));
 });
 
-const createSchema = z.object({
-  entityId: id,
-  name: shortText(120),
-  type: z.enum(['BANK', 'CASH', 'WALLET']).default('BANK'),
-  institution: optionalText(120),
-  openingBalance: money.default(0),
-  openingDate: isoDate.optional(),
-});
+const createSchema = z
+  .object({
+    entityId: id,
+    name: shortText(120),
+    type: accountType.default('BANK'),
+    institution: optionalText(120),
+    /** En tarjetas: deuda actual (positivo). */
+    openingBalance: money.default(0),
+    openingDate: isoDate.optional(),
+    ...cardFields,
+  })
+  .superRefine(refineCard);
 
 export const POST = route(async (req) => {
   const user = await requireUser();
@@ -42,11 +48,30 @@ export const POST = route(async (req) => {
   const settings = await getSettings();
   const date = data.openingDate ?? todayInTz(settings.timezone);
 
+  const isCard = data.type === 'CREDIT_CARD';
+  if (isCard && data.openingBalance < 0) throw badRequest('La deuda inicial no puede ser negativa');
+  if (isCard) await assertPaymentAccount(data.defaultPaymentAccountId, data.entityId);
+
   const account = await prisma.$transaction(async (tx) => {
     const a = await tx.account.create({
-      data: { entityId: data.entityId, name: data.name, type: data.type, institution: data.institution },
+      data: {
+        entityId: data.entityId,
+        name: data.name,
+        type: data.type,
+        institution: data.institution,
+        ...(isCard
+          ? {
+              creditLimit: data.creditLimit == null ? null : dec(data.creditLimit),
+              statementDay: data.statementDay,
+              paymentDueDay: data.paymentDueDay,
+              defaultPaymentAccountId: data.defaultPaymentAccountId ?? null,
+            }
+          : {}),
+      },
     });
-    if (data.openingBalance !== 0) {
+    if (isCard) {
+      if (data.openingBalance > 0) await createOpeningDebt(tx, a, data.openingBalance, date, user.id);
+    } else if (data.openingBalance !== 0) {
       await tx.cashMovement.create({
         data: {
           entityId: a.entityId,
@@ -61,5 +86,5 @@ export const POST = route(async (req) => {
     }
     return a;
   });
-  return ok(accountDto(account, data.openingBalance), { status: 201 });
+  return ok(accountDto(account, isCard ? -data.openingBalance : data.openingBalance), { status: 201 });
 });

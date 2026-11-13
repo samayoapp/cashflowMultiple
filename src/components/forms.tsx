@@ -7,6 +7,7 @@ import { centsToDecimalString, formatMoney, type Cents } from '@/lib/money';
 import { addDays } from '@/lib/dates';
 import { useApp } from './AppContext';
 import { Button, ErrorBox, Field, Modal, Toggle, useToast } from './ui';
+import { CardImpactPreview, INSTALLMENT_OPTIONS, isCard, liquidAccounts } from './cards';
 
 const CURRENCIES = ['HNL', 'USD', 'EUR'];
 const PALETTE = ['#10b981', '#6366f1', '#f59e0b', '#ef4444', '#06b6d4', '#8b5cf6', '#ec4899', '#84cc16'];
@@ -162,6 +163,13 @@ export function AccountFormModal({ open, onClose }: { open: boolean; onClose: ()
   const [institution, setInstitution] = useState('');
   const [opening, setOpening] = useState('0');
   const [date, setDate] = useState(app.today);
+  const [creditLimit, setCreditLimit] = useState('');
+  const [statementDay, setStatementDay] = useState('15');
+  const [paymentDueDay, setPaymentDueDay] = useState('5');
+  const [payFrom, setPayFrom] = useState('');
+  const isCardType = type === 'CREDIT_CARD';
+  const entityAccounts = useApi<AccountDto[]>(open && isCardType && entityId ? `/api/accounts?ctx=${entityId}` : null);
+  const payable = useMemo(() => liquidAccounts(entityAccounts.data), [entityAccounts.data]);
 
   useEffect(() => {
     if (!open) return;
@@ -172,16 +180,31 @@ export function AccountFormModal({ open, onClose }: { open: boolean; onClose: ()
     setInstitution('');
     setOpening('0');
     setDate(app.today);
+    setCreditLimit('');
+    setStatementDay('15');
+    setPaymentDueDay('5');
+    setPayFrom('');
   }, [open, defaultEntity, app.today, setError]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     const amount = parseMoneyInput(opening);
-    if (amount === null) return setError('Saldo inválido');
-    const ok = await run(
-      () => api('/api/accounts', { body: { entityId, name, type, institution, openingBalance: amount, openingDate: date } }),
-      'Cuenta creada',
-    );
+    if (amount === null || (isCardType && Number(amount) < 0)) return setError(isCardType ? 'Deuda inválida' : 'Saldo inválido');
+    const limit = creditLimit.trim() ? parseMoneyInput(creditLimit) : null;
+    if (creditLimit.trim() && limit === null) return setError('Límite inválido');
+    const sd = Number(statementDay);
+    const pd = Number(paymentDueDay);
+    if (isCardType && (!(sd >= 1 && sd <= 31) || !(pd >= 1 && pd <= 31))) return setError('Los días deben estar entre 1 y 31');
+    const body = {
+      entityId,
+      name,
+      type,
+      institution,
+      openingBalance: amount,
+      openingDate: date,
+      ...(isCardType ? { creditLimit: limit, statementDay: sd, paymentDueDay: pd, defaultPaymentAccountId: payFrom || null } : {}),
+    };
+    const ok = await run(() => api('/api/accounts', { body }), isCardType ? 'Tarjeta creada' : 'Cuenta creada');
     if (ok) onClose();
   }
 
@@ -201,14 +224,44 @@ export function AccountFormModal({ open, onClose }: { open: boolean; onClose: ()
               <option value="BANK">Cuenta bancaria</option>
               <option value="CASH">Caja chica</option>
               <option value="WALLET">Billetera digital</option>
+              <option value="CREDIT_CARD">Tarjeta de crédito</option>
             </select>
           </Field>
         </div>
-        <Field label="Institución (opcional)">
+        <Field label={isCardType ? 'Banco emisor (opcional)' : 'Institución (opcional)'}>
           <input className="input" value={institution} onChange={(e) => setInstitution(e.target.value)} />
         </Field>
+        {isCardType && (
+          <div className="space-y-3 rounded-lg border border-slate-200 p-3 dark:border-slate-700">
+            <div className="grid grid-cols-3 gap-3">
+              <Field label="Día de corte">
+                <input className="input text-right" type="number" min={1} max={31} value={statementDay} onChange={(e) => setStatementDay(e.target.value)} required />
+              </Field>
+              <Field label="Día límite de pago">
+                <input className="input text-right" type="number" min={1} max={31} value={paymentDueDay} onChange={(e) => setPaymentDueDay(e.target.value)} required />
+              </Field>
+              <Field label="Límite (opcional)">
+                <input className="input text-right" inputMode="decimal" value={creditLimit} onChange={(e) => setCreditLimit(e.target.value)} />
+              </Field>
+            </div>
+            <Field label="Cuenta de pago por defecto (opcional)">
+              <select className="input" value={payFrom} onChange={(e) => setPayFrom(e.target.value)}>
+                <option value="">Ninguna</option>
+                {payable.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <p className="text-xs text-slate-500">
+              Las compras hasta el día de corte se pagan en la siguiente fecha límite; las posteriores, en la del ciclo subsiguiente.
+              La tarjeta no suma a la Caja real hoy.
+            </p>
+          </div>
+        )}
         <div className="grid grid-cols-2 gap-3">
-          <Field label={`Saldo actual (${app.entityById.get(entityId)?.currency ?? ''})`}>
+          <Field label={`${isCardType ? 'Deuda actual' : 'Saldo actual'} (${app.entityById.get(entityId)?.currency ?? ''})`} hint={isCardType ? 'Se proyecta en la próxima fecha de pago' : undefined}>
             <input className="input text-right" inputMode="decimal" value={opening} onChange={(e) => setOpening(e.target.value)} />
           </Field>
           <Field label="Fecha del saldo">
@@ -220,7 +273,7 @@ export function AccountFormModal({ open, onClose }: { open: boolean; onClose: ()
             Cancelar
           </Button>
           <Button type="submit" variant="primary" loading={loading}>
-            Crear cuenta
+            {isCardType ? 'Crear tarjeta' : 'Crear cuenta'}
           </Button>
         </div>
       </form>
@@ -410,17 +463,29 @@ export function PaymentModal({
   const app = useApp();
   const { loading, error, run, setError } = useSubmit();
   const accounts = useApi<AccountDto[]>(open && target ? `/api/accounts?ctx=${target.entityId}` : null);
-  const active = useMemo(() => (accounts.data ?? []).filter((a) => !a.archived), [accounts.data]);
+  // Una tarjeta solo sirve para pagar (no cobrar), y siempre por el saldo completo
+  const active = useMemo(
+    () => (accounts.data ?? []).filter((a) => !a.archived && (target?.direction === 'OUT' || !isCard(a))),
+    [accounts.data, target?.direction],
+  );
   const [accountId, setAccountId] = useState('');
   const [amount, setAmount] = useState('');
   const [date, setDate] = useState(app.today);
+  const [installments, setInstallments] = useState(1);
+  const selected = active.find((a) => a.id === accountId);
+  const payingWithCard = Boolean(selected && isCard(selected));
 
   useEffect(() => {
     if (!open || !target) return;
     setError(null);
     setAmount(centsInput(target.remaining));
     setDate(app.today);
+    setInstallments(1);
   }, [open, target, app.today, setError]);
+
+  useEffect(() => {
+    if (payingWithCard && target) setAmount(centsInput(target.remaining));
+  }, [payingWithCard, target]);
 
   useEffect(() => {
     if (active.length && !active.some((a) => a.id === accountId)) setAccountId(active[0].id);
@@ -435,8 +500,11 @@ export function PaymentModal({
     const a = parseMoneyInput(amount);
     if (a === null || Number(a) <= 0) return setError('Monto inválido');
     const ok = await run(
-      () => api(`/api/obligations/${target!.id}/payments`, { body: { accountId, amount: a, date } }),
-      `${verb} registrado`,
+      () =>
+        api(`/api/obligations/${target!.id}/payments`, {
+          body: { accountId, amount: a, date, ...(payingWithCard ? { installments } : {}) },
+        }),
+      payingWithCard ? 'Pagado con tarjeta: se proyecta en su fecha de pago' : `${verb} registrado`,
     );
     if (ok) onClose();
   }
@@ -455,7 +523,18 @@ export function PaymentModal({
             <select className="input" value={accountId} onChange={(e) => setAccountId(e.target.value)} required>
               {active.map((a) => (
                 <option key={a.id} value={a.id}>
-                  {a.name} · {formatMoney(a.balance, currency)}
+                  {isCard(a) ? `💳 ${a.name} · deuda ${formatMoney(Math.max(-a.balance, 0), currency)}` : `${a.name} · ${formatMoney(a.balance, currency)}`}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
+        {payingWithCard && (
+          <Field label="Cuotas">
+            <select className="input" value={installments} onChange={(e) => setInstallments(Number(e.target.value))}>
+              {INSTALLMENT_OPTIONS.map((n) => (
+                <option key={n} value={n}>
+                  {n === 1 ? 'Contado (1)' : `${n} cuotas`}
                 </option>
               ))}
             </select>
@@ -468,14 +547,17 @@ export function PaymentModal({
               inputMode="decimal"
               value={amount}
               onChange={(e) => setAmount(e.target.value)}
-              readOnly={full}
+              readOnly={full || payingWithCard}
               required
             />
           </Field>
-          <Field label="Fecha real">
+          <Field label={payingWithCard ? 'Fecha de compra' : 'Fecha real'}>
             <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
           </Field>
         </div>
+        {payingWithCard && (
+          <CardImpactPreview card={selected} purchaseDate={date} amount={target.remaining} installments={installments} currency={currency} />
+        )}
         <div className="flex justify-end gap-2 pt-2">
           <Button type="button" onClick={onClose}>
             Cancelar
@@ -792,12 +874,12 @@ export function ExecuteTransferModal({
     }
   }, [open, app.today, setError]);
   useEffect(() => {
-    const a = fromAccounts.data?.filter((x) => !x.archived);
-    if (a?.length && !a.some((x) => x.id === fromAccountId)) setFromAcc(a[0].id);
+    const a = liquidAccounts(fromAccounts.data);
+    if (a.length && !a.some((x) => x.id === fromAccountId)) setFromAcc(a[0].id);
   }, [fromAccounts.data, fromAccountId]);
   useEffect(() => {
-    const a = toAccounts.data?.filter((x) => !x.archived);
-    if (a?.length && !a.some((x) => x.id === toAccountId)) setToAcc(a[0].id);
+    const a = liquidAccounts(toAccounts.data);
+    if (a.length && !a.some((x) => x.id === toAccountId)) setToAcc(a[0].id);
   }, [toAccounts.data, toAccountId]);
 
   if (!transfer) return null;
@@ -819,7 +901,7 @@ export function ExecuteTransferModal({
         {error && <ErrorBox message={error} />}
         <Field label={`Sale de ${from?.name ?? ''} (${formatMoney(transfer.amountFrom, from?.currency ?? 'HNL')})`}>
           <select className="input" value={fromAccountId} onChange={(e) => setFromAcc(e.target.value)} required>
-            {fromAccounts.data?.filter((a) => !a.archived).map((a) => (
+            {liquidAccounts(fromAccounts.data).map((a) => (
               <option key={a.id} value={a.id}>
                 {a.name}
               </option>
@@ -828,7 +910,7 @@ export function ExecuteTransferModal({
         </Field>
         <Field label={`Entra a ${to?.name ?? ''} (${formatMoney(transfer.amountTo, to?.currency ?? 'HNL')})`}>
           <select className="input" value={toAccountId} onChange={(e) => setToAcc(e.target.value)} required>
-            {toAccounts.data?.filter((a) => !a.archived).map((a) => (
+            {liquidAccounts(toAccounts.data).map((a) => (
               <option key={a.id} value={a.id}>
                 {a.name}
               </option>
