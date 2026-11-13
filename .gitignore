@@ -1,0 +1,40 @@
+# Variables de entorno y secretos (nunca al repo)
+.env
+.env.*
+!.env.example
+
+# Llaves y certificados
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+
+# Dependencias y builds
+node_modules/
+dist/
+build/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Logs y temporales
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# Editores e IDEs
+.vscode/
+.idea/
+*.swp
+
+# Volúmenes locales de Docker
+docker-data/
+
+# Next.js
+.next/
+*.tsbuildinfo
+
+# Respaldos de base de datos generados por deploy.sh
+backups/

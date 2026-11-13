@@ -1,0 +1,352 @@
+// Cashflow Publimatec — Tesorería operativa multi-entidad.
+// IMPORTANTE: este archivo define los tipos de Prisma. Los cambios de esquema en la
+// base se aplican con los SQL idempotentes de prisma/migrations/*.sql (nunca con db push).
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  USER
+}
+
+enum AccountType {
+  BANK
+  CASH
+  WALLET
+}
+
+enum Direction {
+  IN
+  OUT
+}
+
+enum ObligationStatus {
+  OPEN
+  PARTIAL
+  SETTLED
+  CANCELLED
+}
+
+enum Priority {
+  FIXED
+  FLEXIBLE
+}
+
+enum Frequency {
+  WEEKLY
+  BIWEEKLY
+  MONTHLY
+  YEARLY
+}
+
+enum MovementType {
+  OPENING
+  PAYMENT
+  ADJUSTMENT
+  TRANSFER
+}
+
+enum TransferKind {
+  LOAN
+  CONTRIBUTION
+  TRANSFER
+}
+
+enum TransferStatus {
+  PLANNED
+  EXECUTED
+  CANCELLED
+}
+
+enum CounterpartyType {
+  CUSTOMER
+  SUPPLIER
+  BOTH
+}
+
+enum StagingStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model User {
+  id           String             @id @default(uuid())
+  email        String             @unique
+  name         String
+  passwordHash String
+  role         Role               @default(USER)
+  active       Boolean            @default(true)
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+  entityAccess UserEntityAccess[]
+}
+
+model UserEntityAccess {
+  userId   String
+  entityId String
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  entity   Entity @relation(fields: [entityId], references: [id], onDelete: Cascade)
+
+  @@id([userId, entityId])
+}
+
+model AppSetting {
+  id                Int      @id @default(1)
+  reportingCurrency String   @default("HNL")
+  timezone          String   @default("America/Tegucigalpa")
+  updatedAt         DateTime @updatedAt
+}
+
+model Entity {
+  id                String    @id @default(uuid())
+  name              String
+  currency          String    @default("HNL")
+  color             String    @default("#10b981")
+  minCashThreshold  Decimal   @default(0) @db.Decimal(18, 2)
+  isDefault         Boolean   @default(false)
+  archivedAt        DateTime?
+  webhookTokenHash  String?   @unique
+  webhookTokenHint  String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  userAccess     UserEntityAccess[]
+  accounts       Account[]
+  counterparties Counterparty[]
+  categories     Category[]
+  obligations    Obligation[]
+  movements      CashMovement[]
+  recurringRules RecurringRule[]
+  stagingItems   StagingItem[]
+  transfersOut   InterEntityTransfer[] @relation("TransferFrom")
+  transfersIn    InterEntityTransfer[] @relation("TransferTo")
+}
+
+model ExchangeRate {
+  id            String   @id @default(uuid())
+  fromCurrency  String
+  toCurrency    String
+  rate          Decimal  @db.Decimal(18, 6)
+  effectiveDate DateTime @db.Date
+  createdAt     DateTime @default(now())
+
+  @@unique([fromCurrency, toCurrency, effectiveDate])
+}
+
+model Account {
+  id             String         @id @default(uuid())
+  entityId       String
+  name           String
+  type           AccountType    @default(BANK)
+  institution    String?
+  archivedAt     DateTime?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  entity         Entity         @relation(fields: [entityId], references: [id], onDelete: Restrict)
+  movements      CashMovement[]
+  payments       Payment[]
+
+  @@index([entityId])
+}
+
+model CashMovement {
+  id          String       @id @default(uuid())
+  entityId    String
+  accountId   String
+  type        MovementType
+  amount      Decimal      @db.Decimal(18, 2) // con signo: + entra, - sale
+  date        DateTime     @db.Date
+  description String?
+  transferId  String?
+  createdById String?
+  createdAt   DateTime     @default(now())
+  entity      Entity       @relation(fields: [entityId], references: [id], onDelete: Restrict)
+  account     Account      @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  transfer    InterEntityTransfer? @relation(fields: [transferId], references: [id], onDelete: SetNull)
+  payment     Payment?
+
+  @@index([entityId, date])
+  @@index([accountId])
+  @@index([transferId])
+}
+
+model Counterparty {
+  id          String           @id @default(uuid())
+  entityId    String
+  name        String
+  type        CounterpartyType @default(BOTH)
+  externalRef String?
+  createdAt   DateTime         @default(now())
+  entity      Entity           @relation(fields: [entityId], references: [id], onDelete: Restrict)
+  obligations Obligation[]
+  rules       RecurringRule[]
+
+  @@index([entityId])
+}
+
+model Category {
+  id          String          @id @default(uuid())
+  entityId    String
+  name        String
+  direction   Direction
+  color       String?
+  createdAt   DateTime        @default(now())
+  entity      Entity          @relation(fields: [entityId], references: [id], onDelete: Restrict)
+  obligations Obligation[]
+  rules       RecurringRule[]
+
+  @@index([entityId])
+}
+
+model Obligation {
+  id             String           @id @default(uuid())
+  entityId       String
+  direction      Direction
+  description    String
+  amount         Decimal          @db.Decimal(18, 2)
+  dueDate        DateTime         @db.Date
+  expectedDate   DateTime         @db.Date
+  status         ObligationStatus @default(OPEN)
+  priority       Priority         @default(FLEXIBLE)
+  isHypothetical Boolean          @default(false)
+  counterpartyId String?
+  categoryId     String?
+  recurrenceId   String?
+  occurrenceDate DateTime?        @db.Date
+  transferId     String?
+  stagingItemId  String?          @unique
+  notes          String?
+  createdById    String?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  entity         Entity           @relation(fields: [entityId], references: [id], onDelete: Restrict)
+  counterparty   Counterparty?    @relation(fields: [counterpartyId], references: [id], onDelete: SetNull)
+  category       Category?        @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  recurrence     RecurringRule?   @relation(fields: [recurrenceId], references: [id], onDelete: SetNull)
+  transfer       InterEntityTransfer? @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  payments       Payment[]
+  overrides      ScenarioOverride[]
+
+  @@unique([recurrenceId, occurrenceDate])
+  @@index([entityId, status, expectedDate])
+  @@index([transferId])
+}
+
+model Payment {
+  id             String       @id @default(uuid())
+  obligationId   String
+  accountId      String
+  amount         Decimal      @db.Decimal(18, 2) // siempre positivo
+  date           DateTime     @db.Date
+  cashMovementId String       @unique
+  note           String?
+  createdById    String?
+  createdAt      DateTime     @default(now())
+  obligation     Obligation   @relation(fields: [obligationId], references: [id], onDelete: Restrict)
+  account        Account      @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  cashMovement   CashMovement @relation(fields: [cashMovementId], references: [id], onDelete: Restrict)
+
+  @@index([obligationId])
+}
+
+model RecurringRule {
+  id             String        @id @default(uuid())
+  entityId       String
+  direction      Direction
+  description    String
+  amount         Decimal       @db.Decimal(18, 2)
+  frequency      Frequency
+  startDate      DateTime      @db.Date
+  endDate        DateTime?     @db.Date
+  priority       Priority      @default(FLEXIBLE)
+  counterpartyId String?
+  categoryId     String?
+  active         Boolean       @default(true)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  entity         Entity        @relation(fields: [entityId], references: [id], onDelete: Restrict)
+  counterparty   Counterparty? @relation(fields: [counterpartyId], references: [id], onDelete: SetNull)
+  category       Category?     @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  occurrences    Obligation[]
+
+  @@index([entityId])
+}
+
+model InterEntityTransfer {
+  id             String         @id @default(uuid())
+  kind           TransferKind   @default(TRANSFER)
+  status         TransferStatus @default(PLANNED)
+  fromEntityId   String
+  toEntityId     String
+  fromAccountId  String?
+  toAccountId    String?
+  amountFrom     Decimal        @db.Decimal(18, 2)
+  amountTo       Decimal        @db.Decimal(18, 2)
+  expectedDate   DateTime       @db.Date
+  executedDate   DateTime?      @db.Date
+  description    String?
+  createdById    String?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  fromEntity     Entity         @relation("TransferFrom", fields: [fromEntityId], references: [id], onDelete: Restrict)
+  toEntity       Entity         @relation("TransferTo", fields: [toEntityId], references: [id], onDelete: Restrict)
+  obligations    Obligation[]
+  movements      CashMovement[]
+
+  @@index([fromEntityId])
+  @@index([toEntityId])
+}
+
+model Scenario {
+  id        String             @id @default(uuid())
+  name      String
+  isDefault Boolean            @default(false)
+  createdAt DateTime           @default(now())
+  overrides ScenarioOverride[]
+}
+
+model ScenarioOverride {
+  id           String     @id @default(uuid())
+  scenarioId   String
+  obligationId String
+  expectedDate DateTime?  @db.Date
+  amount       Decimal?   @db.Decimal(18, 2)
+  excluded     Boolean    @default(false)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  scenario     Scenario   @relation(fields: [scenarioId], references: [id], onDelete: Cascade)
+  obligation   Obligation @relation(fields: [obligationId], references: [id], onDelete: Cascade)
+
+  @@unique([scenarioId, obligationId])
+}
+
+model StagingItem {
+  id           String        @id @default(uuid())
+  entityId     String
+  source       String?
+  externalId   String?
+  direction    Direction?
+  description  String?
+  amount       Decimal?      @db.Decimal(18, 2)
+  dueDate      DateTime?     @db.Date
+  expectedDate DateTime?     @db.Date
+  counterparty String?
+  payload      Json
+  status       StagingStatus @default(PENDING)
+  reviewedById String?
+  reviewedAt   DateTime?
+  receivedAt   DateTime      @default(now())
+  entity       Entity        @relation(fields: [entityId], references: [id], onDelete: Restrict)
+
+  @@unique([entityId, source, externalId])
+  @@index([entityId, status])
+}

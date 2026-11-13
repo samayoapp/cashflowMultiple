@@ -1,0 +1,18 @@
+# Desarrollo local con hot reload:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+services:
+  cashflow_app:
+    build:
+      target: deps
+    environment:
+      NODE_ENV: development
+    command: >
+      sh -c "npx prisma generate &&
+             ./node_modules/.bin/tsx scripts/migrate.ts &&
+             ./node_modules/.bin/tsx prisma/bootstrap.ts &&
+             npm run dev"
+    entrypoint: []
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/.next

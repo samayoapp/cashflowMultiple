@@ -1,0 +1,60 @@
+# Cashflow Publimatec — producción (y base para desarrollo).
+# Los secretos se leen de .env (nunca se suben a Git). Ver .env.example.
+name: cashflow-publimatec
+
+services:
+  cashflow_db:
+    image: postgres:16-alpine
+    container_name: cashflow_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?Define POSTGRES_USER en .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Define POSTGRES_PASSWORD en .env}
+      POSTGRES_DB: ${POSTGRES_DB:?Define POSTGRES_DB en .env}
+    ports:
+      # Solo accesible desde el propio servidor (usa un túnel SSH para conectarte desde fuera)
+      - "127.0.0.1:${DB_HOST_PORT:-5440}:5432"
+    volumes:
+      - cashflow_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - cashflow_network
+
+  cashflow_app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cashflow_app
+    restart: unless-stopped
+    ports:
+      - "${APP_HOST_PORT:-3020}:3000"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@cashflow_db:5432/${POSTGRES_DB}?schema=public
+      JWT_SECRET: ${JWT_SECRET:?Define JWT_SECRET en .env (mínimo 32 caracteres)}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      ADMIN_NAME: ${ADMIN_NAME:-Administrador}
+      REPORTING_CURRENCY: ${REPORTING_CURRENCY:-HNL}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      APP_URL: ${APP_URL:-http://localhost:3020}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+    depends_on:
+      cashflow_db:
+        condition: service_healthy
+    networks:
+      - cashflow_network
+
+volumes:
+  cashflow_pgdata:
+
+networks:
+  cashflow_network:
+    driver: bridge
