@@ -318,14 +318,7 @@ export function project(input: ProjectionInput): ProjectionResult {
   if (!Number.isFinite(lowPoint.balance)) lowPoint = { date: today, balance: cashToday };
 
   // 7. KPIs
-  const in30End = addDays(today, 29);
-  let inflows30 = 0;
-  let outflows30 = 0;
-  for (const it of items) {
-    if (it.date > in30End) continue;
-    if (it.direction === 'IN') inflows30 += it.amount;
-    else outflows30 += it.amount;
-  }
+  const { inflows: inflows30, outflows: outflows30 } = netFlowWithin(items, today, 30);
 
   let threshold = 0;
   input.entities.forEach((e) => {
@@ -380,4 +373,24 @@ export function project(input: ProjectionInput): ProjectionResult {
     },
     missingRates: Array.from(conv.missing),
   };
+}
+
+/**
+ * Entradas, salidas y flujo neto de las partidas proyectadas en los próximos `days` días
+ * (de hoy a hoy + days − 1). Los montos ya están en la moneda de salida.
+ */
+export function netFlowWithin(
+  items: Pick<ProjectedItem, 'date' | 'direction' | 'amount'>[],
+  today: string,
+  days: number,
+): { inflows: Cents; outflows: Cents; net: Cents; end: string } {
+  const end = addDays(today, days - 1);
+  let inflows = 0;
+  let outflows = 0;
+  for (const it of items) {
+    if (it.date < today || it.date > end) continue;
+    if (it.direction === 'IN') inflows += it.amount;
+    else outflows += it.amount;
+  }
+  return { inflows, outflows, net: inflows - outflows, end };
 }

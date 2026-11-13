@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { project } from './engine';
+import { netFlowWithin, project } from './engine';
 import { expandRule } from './recurrence';
 import { CurrencyConverter } from './currency';
 import type { EngineCardInstallment, EngineEntity, EngineObligation, EngineRule, ProjectionInput } from './types';
@@ -427,5 +427,26 @@ describe('tarjetas bimoneda (HNL / USD)', () => {
   it('sin tasa de tarjeta usa la del consolidado (USD→HNL 25)', () => {
     const r = project(input({ cardInstallments: [ci({ id: 'x', amount: 10_00, currency: 'USD', fxRate4: null })] }));
     expect(r.items.find((i) => i.source === 'CARD_STATEMENT')!.amount).toBe(250_00);
+  });
+});
+
+describe('flujo neto por período', () => {
+  it('30 / 60 / 90 días acumulan solo lo que cae en cada ventana', () => {
+    const r = project(
+      input({
+        obligations: [
+          ob({ id: 'c1', direction: 'IN', amount: 10_000_00, expectedDate: '2026-11-20' }),
+          ob({ id: 'p1', direction: 'OUT', amount: 4_000_00, expectedDate: '2026-12-11' }), // día 30 (último de la ventana)
+          ob({ id: 'p2', direction: 'OUT', amount: 3_000_00, expectedDate: '2026-12-12' }), // día 31
+          ob({ id: 'c2', direction: 'IN', amount: 2_000_00, expectedDate: '2027-01-10' }), // día 60
+          ob({ id: 'p3', direction: 'OUT', amount: 1_000_00, expectedDate: '2027-02-09' }), // día 90
+          ob({ id: 'p4', direction: 'OUT', amount: 9_000_00, expectedDate: '2027-02-10' }), // día 91: fuera
+        ],
+      }),
+    );
+    expect(netFlowWithin(r.items, TODAY, 30)).toEqual({ inflows: 10_000_00, outflows: 4_000_00, net: 6_000_00, end: '2026-12-11' });
+    expect(netFlowWithin(r.items, TODAY, 60).net).toBe(10_000_00 + 2_000_00 - 7_000_00);
+    expect(netFlowWithin(r.items, TODAY, 90).net).toBe(12_000_00 - 8_000_00);
+    expect([r.kpis.inflows30, r.kpis.outflows30, r.kpis.net30]).toEqual([10_000_00, 4_000_00, 6_000_00]);
   });
 });

@@ -1,7 +1,7 @@
 'use client';
 
 import { AlertTriangle, CalendarClock, Gauge, Landmark, TrendingDown, TrendingUp, Wind } from 'lucide-react';
-import type { ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { useApp } from '@/components/AppContext';
 import { Badge, Card, cn, EmptyState, ErrorBox, Loading } from '@/components/ui';
 import { ProjectionChart } from '@/components/ProjectionChart';
@@ -11,6 +11,7 @@ import { useProjection } from '@/lib/client/useProjection';
 import { formatMoney } from '@/lib/money';
 import { addDays, formatLongDate, formatShortDate } from '@/lib/dates';
 import type { ProjectedItem } from '@/lib/projection/types';
+import { netFlowWithin } from '@/lib/projection/engine';
 
 function Kpi({
   title,
@@ -18,12 +19,15 @@ function Kpi({
   sub,
   icon,
   tone = 'default',
+  action,
 }: {
   title: string;
   value: ReactNode;
   sub?: ReactNode;
   icon: ReactNode;
   tone?: 'default' | 'danger' | 'warning' | 'good';
+  /** Control opcional junto al título (p. ej. selector de período). */
+  action?: ReactNode;
 }) {
   return (
     <Card
@@ -34,7 +38,10 @@ function Kpi({
     >
       <div className="flex items-start justify-between gap-2">
         <p className="text-xs font-medium uppercase tracking-wide text-slate-500">{title}</p>
-        <span className="text-slate-400">{icon}</span>
+        <span className="flex items-center gap-2 text-slate-400">
+          {action}
+          {icon}
+        </span>
       </div>
       <p
         className={cn(
@@ -50,10 +57,59 @@ function Kpi({
   );
 }
 
+const PERIODS = [30, 60, 90] as const;
+type Period = (typeof PERIODS)[number];
+const PERIOD_KEY = 'dashboard.netFlowDays';
+
+/** Período del flujo neto; se recuerda por navegador (si el almacenamiento falla, 30 días). */
+function useNetFlowPeriod(): [Period, (p: Period) => void] {
+  const [p, setP] = useState<Period>(30);
+  useEffect(() => {
+    try {
+      const v = Number(localStorage.getItem(PERIOD_KEY));
+      if ((PERIODS as readonly number[]).includes(v)) setP(v as Period);
+    } catch {
+      /* sin almacenamiento */
+    }
+  }, []);
+  return [
+    p,
+    (next) => {
+      setP(next);
+      try {
+        localStorage.setItem(PERIOD_KEY, String(next));
+      } catch {
+        /* sin almacenamiento */
+      }
+    },
+  ];
+}
+
+function PeriodPicker({ value, onChange }: { value: Period; onChange: (p: Period) => void }) {
+  return (
+    <span className="inline-flex overflow-hidden rounded-lg border border-slate-200 text-[11px] font-medium dark:border-slate-700">
+      {PERIODS.map((p) => (
+        <button
+          key={p}
+          type="button"
+          onClick={() => onChange(p)}
+          className={cn(
+            'px-1.5 py-0.5 tabular-nums',
+            p === value ? 'bg-slate-800 text-white dark:bg-slate-200 dark:text-slate-900' : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800',
+          )}
+        >
+          {p}d
+        </button>
+      ))}
+    </span>
+  );
+}
+
 export default function DashboardPage() {
   const app = useApp();
   const { data, error, loading } = useProjection();
   const actions = useItemActions();
+  const [period, setPeriod] = useNetFlowPeriod();
 
   if (error) return <ErrorBox message={error} />;
   if (loading || !data) return <Loading />;
@@ -67,6 +123,8 @@ export default function DashboardPage() {
   const overdueReceivables = result.items.filter((i) => i.direction === 'IN' && i.overdue);
   const fixedPayables = result.items.filter((i) => i.direction === 'OUT' && i.priority === 'FIXED' && i.date <= in7);
   const lowTone = kpis.lowPointBelowZero ? 'danger' : kpis.lowPointBelowThreshold ? 'warning' : 'default';
+
+  const flow = netFlowWithin(result.items, result.today, period);
 
   const totalCash = result.byEntity.reduce((s, e) => s + Math.max(e.cash, 0), 0);
   const totalIn = result.byEntity.reduce((s, e) => s + e.inflows13w, 0);
@@ -105,11 +163,12 @@ export default function DashboardPage() {
           icon={<Landmark className="h-5 w-5" />}
         />
         <Kpi
-          title="Flujo neto 30 días"
-          value={money(kpis.net30)}
-          tone={kpis.net30 < 0 ? 'danger' : 'good'}
-          sub={`Entradas ${formatMoney(kpis.inflows30, currency, { compact: true })} · Salidas ${formatMoney(kpis.outflows30, currency, { compact: true })}`}
-          icon={kpis.net30 < 0 ? <TrendingDown className="h-5 w-5" /> : <TrendingUp className="h-5 w-5" />}
+          title={`Flujo neto ${period} días`}
+          value={money(flow.net)}
+          tone={flow.net < 0 ? 'danger' : 'good'}
+          sub={`Entradas ${formatMoney(flow.inflows, currency, { compact: true })} · Salidas ${formatMoney(flow.outflows, currency, { compact: true })} · hasta ${formatShortDate(flow.end)}`}
+          icon={flow.net < 0 ? <TrendingDown className="h-5 w-5" /> : <TrendingUp className="h-5 w-5" />}
+          action={<PeriodPicker value={period} onChange={setPeriod} />}
         />
         <Kpi
           title="Runway / oxígeno"
