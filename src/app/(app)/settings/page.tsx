@@ -67,6 +67,10 @@ function AccountsTab() {
 
   const TYPE: Record<string, string> = { BANK: 'Banco', CASH: 'Caja chica', WALLET: 'Billetera', CREDIT_CARD: 'Tarjeta de crédito' };
   const recIsCard = reconciling?.type === 'CREDIT_CARD';
+  const [recCurrency, setRecCurrency] = useState<string | null>(null); // null = moneda de la entidad
+  const recEntityCur = reconciling ? (app.entityById.get(reconciling.entityId)?.currency ?? 'HNL') : 'HNL';
+  const recCur = recCurrency ?? recEntityCur;
+  const recBalance = reconciling ? (recCurrency ? reconciling.balanceForeign : reconciling.balance) : 0;
 
   return (
     <Card className="p-0 sm:p-0">
@@ -118,12 +122,17 @@ function AccountsTab() {
                         <div className="text-xs text-slate-500">
                           Corte {a.statementDay} · pago {a.paymentDueDay}
                           {a.creditLimit ? ` · límite ${formatMoney(a.creditLimit, e?.currency ?? 'HNL')}` : ''}
+                          {a.foreignCurrency && ` · bimoneda${a.creditLimitForeign ? ` (límite ${formatMoney(a.creditLimitForeign, a.foreignCurrency)})` : ''}`}
+                          {a.customSellRate && ` · tasa propia ${a.customSellRate}`}
                         </div>
                       )}
                     </td>
                     {a.type === 'CREDIT_CARD' ? (
                       <td className="td num font-semibold text-rose-600">
                         {a.balance < 0 ? `Deuda ${formatMoney(-a.balance, e?.currency ?? 'HNL')}` : formatMoney(a.balance, e?.currency ?? 'HNL')}
+                        {a.foreignCurrency && (
+                          <div>{a.balanceForeign < 0 ? `+ ${formatMoney(-a.balanceForeign, a.foreignCurrency)}` : formatMoney(a.balanceForeign, a.foreignCurrency)}</div>
+                        )}
                       </td>
                     ) : (
                       <td className={cn('td num font-semibold', a.balance < 0 && 'text-rose-600')}>{formatMoney(a.balance, e?.currency ?? 'HNL')}</td>
@@ -135,6 +144,7 @@ function AccountsTab() {
                             size="sm"
                             onClick={() => {
                               setReconciling(a);
+                              setRecCurrency(null);
                               setActual(centsInput(a.type === 'CREDIT_CARD' ? -a.balance : a.balance));
                             }}
                           >
@@ -174,7 +184,7 @@ function AccountsTab() {
                 // En tarjetas se captura la deuda (positiva); el saldo contable es su negativo
                 const balance = recIsCard ? centsToDecimalString(-toCents(v)) : v;
                 const ok = await act(
-                  () => api(`/api/accounts/${reconciling.id}/reconcile`, { body: { actualBalance: balance } }),
+                  () => api(`/api/accounts/${reconciling.id}/reconcile`, { body: { actualBalance: balance, currency: recCurrency } }),
                   'Saldo conciliado',
                 );
                 if (ok) setReconciling(null);
@@ -185,9 +195,25 @@ function AccountsTab() {
           </>
         }
       >
+        {recIsCard && reconciling?.foreignCurrency && (
+          <div className="mb-3">
+            <Tabs<string>
+              tabs={[
+                { id: 'base', label: `Sub-saldo ${recEntityCur}` },
+                { id: reconciling.foreignCurrency, label: `Sub-saldo ${reconciling.foreignCurrency}` },
+              ]}
+              value={recCurrency ?? 'base'}
+              onChange={(v) => {
+                const cur = v === 'base' ? null : v;
+                setRecCurrency(cur);
+                setActual(centsInput(-(cur ? reconciling.balanceForeign : reconciling.balance)));
+              }}
+            />
+          </div>
+        )}
         {recIsCard ? (
           <p className="mb-3 text-sm text-slate-500">
-            Deuda en sistema: <strong>{reconciling && formatMoney(Math.max(-reconciling.balance, 0), app.entityById.get(reconciling.entityId)?.currency ?? 'HNL')}</strong>.
+            Deuda en sistema: <strong>{reconciling && formatMoney(Math.max(-recBalance, 0), recCur)}</strong>.
             Ingresa la deuda que muestra el banco (p. ej. con intereses o comisiones); la diferencia se registra como ajuste. Para
             proyectar su pago, registra los intereses como un consumo.
           </p>
@@ -197,7 +223,7 @@ function AccountsTab() {
             el saldo que muestra el banco hoy; la diferencia se registra como ajuste.
           </p>
         )}
-        <Field label={recIsCard ? 'Deuda según estado de cuenta' : 'Saldo real según banco'}>
+        <Field label={recIsCard ? `Deuda según estado de cuenta (${recCur})` : 'Saldo real según banco'}>
           <input className="input text-right" inputMode="decimal" value={actual} onChange={(e) => setActual(e.target.value)} autoFocus />
         </Field>
       </Modal>
@@ -351,6 +377,10 @@ interface RateRow {
   toCurrency: string;
   rate: string;
   effectiveDate: string;
+  officialSellRate: string | null;
+  bankSpread: string | null;
+  effectiveSellRate: string | null;
+  source: string | null;
 }
 
 function RatesTab() {
@@ -393,7 +423,9 @@ function RatesTab() {
               Guardar tasa
             </Button>
             <p className="text-xs text-slate-500">
-              Solo se usan para la vista consolidada (moneda de reporte: {app.settings.reportingCurrency}). Nunca alteran los saldos reales.
+              Se usan para la vista consolidada (moneda de reporte: {app.settings.reportingCurrency}). Nunca alteran los saldos reales. La
+              tasa USD→HNL del día (con spread bancario para tarjetas) se sincroniza sola a las 08:30; edítala desde el indicador de la
+              barra superior.
             </p>
           </form>
         </Card>
@@ -413,6 +445,9 @@ function RatesTab() {
               <tr>
                 <th className="th">Par</th>
                 <th className="th text-right">Tasa</th>
+                <th className="th text-right">Spread</th>
+                <th className="th text-right">Venta efectiva</th>
+                <th className="th">Fuente</th>
                 <th className="th">Vigente desde</th>
                 <th className="th" />
               </tr>
@@ -424,6 +459,9 @@ function RatesTab() {
                     1 {r.fromCurrency} = {r.toCurrency}
                   </td>
                   <td className="td num">{Number(r.rate).toLocaleString('es-HN', { maximumFractionDigits: 6 })}</td>
+                  <td className="td num text-slate-500">{r.bankSpread ?? '—'}</td>
+                  <td className="td num font-semibold">{r.effectiveSellRate ?? '—'}</td>
+                  <td className="td text-xs">{r.source === 'API' ? 'En línea' : r.source === 'MANUAL' ? 'Manual' : (r.source ?? 'Manual')}</td>
                   <td className="td">{r.effectiveDate}</td>
                   <td className="td text-right">
                     {app.isAdmin && (

@@ -2,6 +2,7 @@ import { addDays, diffDays, startOfWeek } from '@/lib/dates';
 import type { Cents } from '@/lib/money';
 import { CurrencyConverter } from './currency';
 import { expandRule } from './recurrence';
+import { convertPair } from './fx';
 import type {
   DailyPoint,
   EngineEntity,
@@ -40,6 +41,12 @@ export function project(input: ProjectionInput): ProjectionResult {
     const e = entities.get(entityId);
     if (!e) return null;
     return conv.convert(amount, e.currency, outputCurrency);
+  };
+
+  /** Parte extranjera de una tarjeta -> moneda de la entidad: tasa de la tarjeta o, si falta, la del consolidado. */
+  const cardForeignToNative = (amount: Cents, from: string, to: string, r4: number | null): Cents | null => {
+    if (r4 && ((from === 'USD' && to === 'HNL') || (from === 'HNL' && to === 'USD'))) return convertPair(amount, from, to, r4);
+    return conv.convert(amount, from, to);
   };
 
   const week0 = startOfWeek(today);
@@ -146,6 +153,7 @@ export function project(input: ProjectionInput): ProjectionResult {
   // 3. Estados de cuenta de tarjetas: cuotas pendientes agrupadas por (tarjeta, fecha límite)
   const statements = new Map<string, ProjectedItem>();
   for (const ci of input.cardInstallments ?? []) {
+    // (los montos se acumulan por moneda y se convierten al cerrar el grupo)
     const entity = entities.get(ci.entityId);
     if (!entity) continue;
     const pending = ci.amount - ci.settled;
@@ -181,10 +189,18 @@ export function project(input: ProjectionInput): ProjectionResult {
         weekIndex: weekIndexOf(date),
         cardAccountId: ci.cardAccountId,
         cardDetails: [],
+        cardBreakdown: { base: 0, foreign: 0, foreignCurrency: null, rate4: null },
       };
       statements.set(key, st);
     }
-    st.amountNative += pending;
+    const cur = ci.currency && ci.currency !== entity.currency ? ci.currency : entity.currency;
+    const bd = st.cardBreakdown!;
+    if (cur === entity.currency) bd.base += pending;
+    else {
+      bd.foreign += pending;
+      bd.foreignCurrency = cur;
+      if (ci.fxRate4) bd.rate4 = ci.fxRate4;
+    }
     st.cardDetails!.push({
       installmentId: ci.id,
       chargeId: ci.chargeId,
@@ -194,11 +210,19 @@ export function project(input: ProjectionInput): ProjectionResult {
       purchaseDate: ci.purchaseDate,
       number: ci.number,
       count: ci.count,
+      currency: cur,
       pendingNative: pending,
     });
   }
   statements.forEach((st) => {
-    // Se convierte el total del estado (no cada cuota) para no acumular redondeos
+    // Salida = saldo local + saldo extranjero × tasa de venta efectiva (se convierte el total, no cada cuota)
+    const bd = st.cardBreakdown!;
+    let foreignNative: Cents | null = 0;
+    if (bd.foreign > 0 && bd.foreignCurrency) {
+      foreignNative = cardForeignToNative(bd.foreign, bd.foreignCurrency, st.nativeCurrency, bd.rate4);
+      if (foreignNative === null) return;
+    }
+    st.amountNative = bd.base + foreignNative;
     const amount = toOut(st.amountNative, st.entityId);
     if (amount === null) return;
     st.amount = amount;
@@ -218,8 +242,13 @@ export function project(input: ProjectionInput): ProjectionResult {
     const v = toOut(b.balance, b.entityId);
     if (v === null) continue;
     if (b.kind === 'CREDIT_CARD') {
-      // saldo negativo = deuda; un saldo a favor no se cuenta como caja
-      if (v < 0) debtByEntity.set(b.entityId, (debtByEntity.get(b.entityId) ?? 0) - v);
+      // saldo negativo = deuda; un saldo a favor no se cuenta como caja.
+      // Sub-saldo en moneda extranjera: se convierte a la tasa de venta de la tarjeta.
+      let native: Cents | null = b.balance;
+      const ent = entities.get(b.entityId)!;
+      if (b.currency && b.currency !== ent.currency) native = cardForeignToNative(b.balance, b.currency, ent.currency, b.fxRate4 ?? null);
+      const out = native === null ? null : toOut(native, b.entityId);
+      if (out !== null && out < 0) debtByEntity.set(b.entityId, (debtByEntity.get(b.entityId) ?? 0) - out);
       continue;
     }
     cashByEntity.set(b.entityId, (cashByEntity.get(b.entityId) ?? 0) + v);

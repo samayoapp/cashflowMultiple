@@ -13,6 +13,7 @@ import { project } from '@/lib/projection/engine';
 import type { ProjectedItem, ProjectionInput } from '@/lib/projection/types';
 import { addDays, addMonths, diffDays, formatShortDate, toUTCDate, type ISODate } from '@/lib/dates';
 import { centsToDecimalString, formatMoney, toCents, type Cents } from '@/lib/money';
+import { rateToString } from '@/lib/projection/fx';
 import type { ObligationDto } from '@/lib/server/dto';
 
 type View = 'weeks' | 'months';
@@ -231,6 +232,18 @@ export default function MatrixPage() {
     const e = app.entityById.get(item.entityId);
     const expanded = expandedCards.has(item.key);
     const details = item.cardDetails ?? [];
+    const bd = item.cardBreakdown;
+    const breakdownText =
+      bd && bd.foreign > 0 && bd.foreignCurrency
+        ? `Incluye ${formatMoney(bd.base, item.nativeCurrency)} + ${formatMoney(bd.foreign, bd.foreignCurrency)}${bd.rate4 ? ` @ ${rateToString(bd.rate4)}` : ''}`
+        : null;
+    const amountTitle = [
+      breakdownText,
+      item.nativeCurrency !== currency ? `Total: ${formatMoney(item.amountNative, item.nativeCurrency)}` : null,
+      'Se modifica desde Operaciones → Tarjetas',
+    ]
+      .filter(Boolean)
+      .join('\n');
     return (
       <Fragment key={item.key}>
         <tr className="group border-t border-slate-100 hover:bg-slate-50/70 dark:border-slate-800/70 dark:hover:bg-slate-800/30">
@@ -254,6 +267,11 @@ export default function MatrixPage() {
               <Badge tone="blue">
                 {details.length} consumo{details.length === 1 ? '' : 's'} · límite {formatShortDate(item.dueDate)}
               </Badge>
+              {breakdownText && (
+                <span className="text-[11px] text-slate-500" title={breakdownText}>
+                  {breakdownText}
+                </span>
+              )}
             </div>
           </td>
           {columns.map((c, i) => (
@@ -261,7 +279,7 @@ export default function MatrixPage() {
               {i === col && (
                 <span
                   className="inline-block rounded px-2 py-1 text-sm font-medium tabular-nums text-rose-700 dark:text-rose-400"
-                  title={item.nativeCurrency !== currency ? formatMoney(item.amountNative, item.nativeCurrency) : 'Se modifica desde Operaciones → Tarjetas'}
+                  title={amountTitle}
                 >
                   {formatMoney(item.amount, currency).replace(currency, '').trim()}
                 </span>
@@ -285,7 +303,11 @@ export default function MatrixPage() {
               </td>
               {columns.map((c, i) => (
                 <td key={c.key} className="px-3 py-1 text-right text-xs tabular-nums text-slate-500">
-                  {i === col ? formatMoney(d.pendingNative, item.nativeCurrency).replace(item.nativeCurrency, '').trim() : ''}
+                  {i === col
+                    ? d.currency !== item.nativeCurrency
+                      ? formatMoney(d.pendingNative, d.currency)
+                      : formatMoney(d.pendingNative, item.nativeCurrency).replace(item.nativeCurrency, '').trim()
+                    : ''}
                 </td>
               ))}
             </tr>

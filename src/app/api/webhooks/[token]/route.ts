@@ -6,7 +6,7 @@ import { ApiError, readJson, route } from '@/lib/server/api';
 import { hashToken } from '@/lib/server/tokens';
 import { dbDate, dec } from '@/lib/server/serialize';
 import { isISODate } from '@/lib/dates';
-import { toCents } from '@/lib/money';
+import { parseAmountWithCurrency } from '@/lib/projection/fx';
 
 export const dynamic = 'force-dynamic';
 
@@ -23,7 +23,9 @@ export const dynamic = 'force-dynamic';
  *   "expectedDate": "2026-12-15",      (opcional)
  *   "counterparty": "Cliente S.A.",    (opcional)
  *   "externalId": "crm-proposal-991",  (opcional; evita duplicados)
- *   "source": "crm-publimatec"         (opcional)
+ *   "source": "crm-publimatec",        (opcional)
+ *   "currency": "USD" | "HNL",         (opcional; también se detecta en "amount": "$ 45.00" / "L. 300")
+ *   "card": "Visa Empresarial"         (opcional; pista para aprobarlo como consumo con tarjeta)
  * }
  */
 const schema = z
@@ -37,6 +39,9 @@ const schema = z
     counterparty: z.string().max(160).optional(),
     externalId: z.string().max(120).optional(),
     source: z.string().max(60).optional(),
+    currency: z.string().max(10).optional(),
+    card: z.string().max(120).optional(),
+    cardName: z.string().max(120).optional(),
   })
   .passthrough();
 
@@ -48,14 +53,13 @@ function parseDirection(v?: string): 'IN' | 'OUT' | null {
   return null;
 }
 
-function parseAmount(v?: string | number): number | null {
-  if (v === undefined) return null;
-  try {
-    const c = toCents(typeof v === 'number' ? v : v.replace(/,/g, ''));
-    return c > 0 ? c : null;
-  } catch {
-    return null;
-  }
+/** Moneda explícita: "USD" | "$" | "dólares" / "HNL" | "L" | "L." | "lempiras". */
+function parseCurrency(v?: string): 'HNL' | 'USD' | null {
+  const s = v?.trim().toLowerCase().replace(/\.$/, '');
+  if (!s) return null;
+  if (['usd', '$', 'us$', 'dolar', 'dólar', 'dolares', 'dólares'].includes(s)) return 'USD';
+  if (['hnl', 'l', 'lps', 'lempira', 'lempiras'].includes(s)) return 'HNL';
+  return null;
 }
 
 export const POST = route<{ params: { token: string } }>(async (req, { params }) => {
@@ -66,7 +70,13 @@ export const POST = route<{ params: { token: string } }>(async (req, { params })
 
   const raw = await readJson(req, 64 * 1024);
   const body = schema.parse(raw);
-  const amount = parseAmount(body.amount);
+  // Monto y moneda: "$ 45.00", "L. 3,000", "80 USD"… La moneda explícita tiene prioridad; luego la del monto
+  // y, si no hay, la que aparezca en la descripción.
+  const parsed = parseAmountWithCurrency(body.amount);
+  const amount = parsed?.cents ?? null;
+  const currency =
+    parseCurrency(body.currency) ?? parsed?.currency ?? (body.description ? parseAmountWithCurrency(body.description)?.currency ?? null : null);
+  const cardHint = (body.card ?? body.cardName)?.trim() || null;
   const source = body.source?.trim() || 'webhook';
   const externalId = body.externalId?.trim() || null;
 
@@ -87,6 +97,8 @@ export const POST = route<{ params: { token: string } }>(async (req, { params })
         dueDate: body.dueDate && isISODate(body.dueDate) ? dbDate(body.dueDate) : null,
         expectedDate: body.expectedDate && isISODate(body.expectedDate) ? dbDate(body.expectedDate) : null,
         counterparty: body.counterparty?.trim() || null,
+        currency,
+        cardHint,
         payload: raw as Prisma.InputJsonValue,
       },
     });

@@ -2,6 +2,7 @@ import { prisma } from './db';
 import { cents, isoOf, isoOrNull, dbDate } from './serialize';
 import type { ResolvedContext } from './scope';
 import { todayInTz } from '@/lib/dates';
+import { cardRateFor, getCurrentFx } from './fx';
 import type {
   EngineAccountBalance,
   EngineCardInstallment,
@@ -36,20 +37,26 @@ export async function getDefaultScenarioId(): Promise<string> {
  * Las tarjetas se marcan como CREDIT_CARD (saldo negativo = deuda) para que no sumen a la caja.
  */
 export async function getAccountBalances(entityIds: string[]): Promise<EngineAccountBalance[]> {
-  const [rows, cards] = await Promise.all([
+  const [rows, cards, fx] = await Promise.all([
     prisma.cashMovement.groupBy({
-      by: ['accountId', 'entityId'],
+      by: ['accountId', 'entityId', 'currency'],
       where: { entityId: { in: entityIds } },
       _sum: { amount: true },
     }),
-    prisma.account.findMany({ where: { entityId: { in: entityIds }, type: 'CREDIT_CARD' }, select: { id: true } }),
+    prisma.account.findMany({
+      where: { entityId: { in: entityIds }, type: 'CREDIT_CARD' },
+      select: { id: true, customSellRate: true },
+    }),
+    getCurrentFx(),
   ]);
-  const cardIds = new Set(cards.map((c) => c.id));
+  const cardRate = new Map(cards.map((c) => [c.id, cardRateFor(c, fx)]));
   return rows.map((r) => ({
     accountId: r.accountId,
     entityId: r.entityId,
     balance: cents(r._sum.amount),
-    kind: cardIds.has(r.accountId) ? ('CREDIT_CARD' as const) : ('LIQUID' as const),
+    kind: cardRate.has(r.accountId) ? ('CREDIT_CARD' as const) : ('LIQUID' as const),
+    currency: r.currency,
+    fxRate4: r.currency ? (cardRate.get(r.accountId) ?? null) : null,
   }));
 }
 
@@ -62,7 +69,7 @@ export async function getPendingCardInstallments(entityIds: string[]): Promise<E
   const list = await prisma.cardInstallment.findMany({
     where: { id: { in: rows.map((r) => r.id) } },
     include: {
-      card: { select: { name: true } },
+      card: { select: { name: true, customSellRate: true } },
       charge: {
         select: {
           description: true,
@@ -73,6 +80,7 @@ export async function getPendingCardInstallments(entityIds: string[]): Promise<E
       },
     },
   });
+  const fx = await getCurrentFx();
   return list.map((i) => ({
     id: i.id,
     chargeId: i.chargeId,
@@ -89,6 +97,8 @@ export async function getPendingCardInstallments(entityIds: string[]): Promise<E
     settled: cents(i.settledAmount),
     statementDate: isoOf(i.statementDate),
     dueDate: isoOf(i.dueDate),
+    currency: i.currency,
+    fxRate4: i.currency ? cardRateFor(i.card, fx) : null,
   }));
 }
 

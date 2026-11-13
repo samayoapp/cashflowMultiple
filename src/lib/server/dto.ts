@@ -18,7 +18,7 @@ export function entityDto(e: Entity) {
 }
 export type EntityDto = ReturnType<typeof entityDto>;
 
-export function accountDto(a: Account, balance: number) {
+export function accountDto(a: Account, balance: number, balanceForeign = 0) {
   return {
     id: a.id,
     entityId: a.entityId,
@@ -32,6 +32,11 @@ export function accountDto(a: Account, balance: number) {
     statementDay: a.statementDay,
     paymentDueDay: a.paymentDueDay,
     defaultPaymentAccountId: a.defaultPaymentAccountId,
+    /** Tarjeta bimoneda: segunda moneda y su sub-saldo (negativo = deuda). */
+    foreignCurrency: a.foreignCurrency,
+    balanceForeign,
+    creditLimitForeign: a.creditLimitForeign ? cents(a.creditLimitForeign) : null,
+    customSellRate: a.customSellRate ? Number(a.customSellRate.toString()).toFixed(4) : null,
   };
 }
 export type AccountDto = ReturnType<typeof accountDto>;

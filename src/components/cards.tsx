@@ -7,6 +7,7 @@ import { api, emitDataChanged, useApi } from '@/lib/client/api';
 import { formatMoney, toCents, type Cents } from '@/lib/money';
 import { formatLongDate, formatShortDate } from '@/lib/dates';
 import { buildSchedule, paymentDateForPurchase } from '@/lib/projection/card-cycle';
+import { convertPair, rate4, rateToString } from '@/lib/projection/fx';
 import { useApp } from './AppContext';
 import { Badge, Button, ErrorBox, Field, Modal, Tabs, useToast } from './ui';
 import { centsInput, parseMoneyInput } from './forms';
@@ -105,6 +106,7 @@ export function CardChargeModal({
   const [categoryId, setCategoryId] = useState('');
   const [amount, setAmount] = useState('');
   const [installments, setInstallments] = useState(1);
+  const [chargeCurrency, setChargeCurrency] = useState<string>('');
   // tercero
   const [ownerKind, setOwnerKind] = useState<'PERSON' | 'ENTITY'>('PERSON');
   const [ownerName, setOwnerName] = useState('');
@@ -123,7 +125,11 @@ export function CardChargeModal({
   const cards = useMemo(() => (accounts.data ?? []).filter((a) => isCard(a) && !a.archived), [accounts.data]);
   const ownerCards = useMemo(() => (ownerAccounts.data ?? []).filter((a) => isCard(a) && !a.archived), [ownerAccounts.data]);
   const card = cards.find((c) => c.id === cardId);
-  const currency = app.entityById.get(entityId)?.currency ?? 'HNL';
+  const baseCurrency = app.entityById.get(entityId)?.currency ?? 'HNL';
+  const dualCard = mode === 'card' && Boolean(card?.foreignCurrency);
+  const currency = dualCard && chargeCurrency ? chargeCurrency : baseCurrency;
+  const isForeign = currency !== baseCurrency;
+  const cardRate = card?.customSellRate ?? app.fx?.effectiveSellRate ?? null;
   const ownerEntity = app.entityById.get(ownerEntityId);
   const sameCurrency = !ownerEntity || ownerEntity.currency === currency;
 
@@ -140,6 +146,7 @@ export function CardChargeModal({
     setCategoryId('');
     setAmount('');
     setInstallments(1);
+    setChargeCurrency('');
     setOwnerKind('PERSON');
     setOwnerName('');
     setOwnerEntityId('');
@@ -166,8 +173,9 @@ export function CardChargeModal({
     };
     if (mode === 'card') {
       if (!cardId) return setError('Selecciona la tarjeta');
+      if (isForeign && !cardRate) return setError('No hay tipo de cambio: sincronízalo desde la barra superior');
       const ok = await run(
-        () => api(`/api/cards/${cardId}/charges`, { body: { ...common, installments } }),
+        () => api(`/api/cards/${cardId}/charges`, { body: { ...common, installments, currency } }),
         installments > 1 ? `Consumo registrado en ${installments} cuotas` : 'Consumo registrado',
       );
       if (ok) onClose();
@@ -255,7 +263,25 @@ export function CardChargeModal({
         </div>
         <div className="grid grid-cols-3 gap-3">
           <Field label={`Monto total (${currency})`}>
-            <input className="input text-right" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} required />
+            <div className="flex gap-1">
+              {dualCard && (
+                <select
+                  className="input w-20 shrink-0 px-2"
+                  value={currency}
+                  onChange={(e) => setChargeCurrency(e.target.value)}
+                  aria-label="Moneda del consumo"
+                >
+                  <option value={baseCurrency}>{baseCurrency}</option>
+                  <option value={card!.foreignCurrency!}>{card!.foreignCurrency}</option>
+                </select>
+              )}
+              <input className="input min-w-0 text-right" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} required />
+            </div>
+            {isForeign && cents && cardRate && (
+              <p className="mt-1 text-xs text-slate-500 tabular-nums">
+                ≈ {formatMoney(convertPair(cents, currency, baseCurrency, rate4(cardRate)), baseCurrency)} @ {cardRate}
+              </p>
+            )}
           </Field>
           <Field label="Fecha de compra">
             <input className="input" type="date" value={purchaseDate} onChange={(e) => setPurchaseDate(e.target.value)} required />
@@ -357,26 +383,37 @@ export function CardPaymentModal({ open, onClose, target }: { open: boolean; onC
   const app = useApp();
   const { loading, error, run, setError } = useSubmit();
   const accounts = useApi<AccountDto[]>(open && target ? `/api/accounts?ctx=${target.entityId}` : null);
-  const summary = useApi<{ id: string; debt: Cents; nextPayment: { dueDate: string; pending: Cents } | null }[]>(
-    open && target ? `/api/cards?ctx=${target.entityId}` : null,
-  );
+  const summary = useApi<CardSummaryLite[]>(open && target ? `/api/cards?ctx=${target.entityId}` : null);
   const sources = useMemo(() => liquidAccounts(accounts.data), [accounts.data]);
   const card = accounts.data?.find((a) => a.id === target?.cardId);
   const info = summary.data?.find((c) => c.id === target?.cardId);
   const [fromAccountId, setFrom] = useState('');
   const [amount, setAmount] = useState('');
+  const [amountForeign, setAmountForeign] = useState('');
+  const [rate, setRate] = useState('');
   const [date, setDate] = useState(app.today);
+  const [prefilled, setPrefilled] = useState(false);
 
   useEffect(() => {
     if (!open) return;
     setError(null);
     setDate(app.today);
-    setAmount(target?.suggested ? centsInput(target.suggested) : '');
+    setAmount('');
+    setAmountForeign('');
+    setRate('');
+    setPrefilled(false);
   }, [open, target, app.today, setError]);
 
+  // Prellenado: estado de cuenta próximo (o el monto sugerido) en ambas monedas + tasa vigente de la tarjeta
   useEffect(() => {
-    if (!amount && info?.nextPayment) setAmount(centsInput(info.nextPayment.pending));
-  }, [info, amount]);
+    if (prefilled || !info || !target) return;
+    if (info.nextPayment) {
+      setAmount(centsInput(info.nextPayment.pending));
+      setAmountForeign(info.foreignCurrency ? centsInput(info.nextPayment.pendingForeign) : '');
+    } else if (target.suggested) setAmount(centsInput(target.suggested));
+    setRate(info.sellRate ?? '');
+    setPrefilled(true);
+  }, [info, target, prefilled]);
 
   useEffect(() => {
     if (!sources.length) return;
@@ -387,24 +424,58 @@ export function CardPaymentModal({ open, onClose, target }: { open: boolean; onC
 
   if (!target) return null;
   const currency = app.entityById.get(target.entityId)?.currency ?? 'HNL';
+  const foreign = info?.foreignCurrency ?? null;
+
+  const base = parseMoneyInput(amount || '0');
+  const fgn = foreign ? parseMoneyInput(amountForeign || '0') : '0';
+  const rateOk = /^\d+(\.\d{1,4})?$/.test(rate.trim()) && Number(rate) > 0;
+  const baseC = base ? toCents(base) : 0;
+  const fgnC = fgn ? toCents(fgn) : 0;
+  const foreignInBase = foreign && fgnC > 0 && rateOk ? convertPair(fgnC, foreign, currency, rate4(rate.trim())) : 0;
+  const bankTotal = baseC + foreignInBase;
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    const a = parseMoneyInput(amount);
-    if (a === null || Number(a) <= 0) return setError('Monto inválido');
-    const ok = await run(() => api(`/api/cards/${target!.cardId}/payments`, { body: { fromAccountId, amount: a, date } }), 'Pago de tarjeta registrado');
+    if (base === null || Number(base) < 0) return setError(`Monto en ${currency} inválido`);
+    if (fgn === null || Number(fgn) < 0) return setError(`Monto en ${foreign} inválido`);
+    if (baseC === 0 && fgnC === 0) return setError('Indica el monto a pagar');
+    if (fgnC > 0 && !rateOk) return setError('Tasa aplicada inválida (hasta 4 decimales)');
+    const ok = await run(
+      () =>
+        api(`/api/cards/${target!.cardId}/payments`, {
+          body: { fromAccountId, amountBase: base, amountForeign: fgn, ...(fgnC > 0 ? { fxRate: rate.trim() } : {}), date },
+        }),
+      'Pago de tarjeta registrado',
+    );
     if (ok) onClose();
   }
+
+  const shortcut = (label: string, b: Cents, f: Cents) => (
+    <button
+      type="button"
+      className="text-brand-600 hover:underline"
+      onClick={() => {
+        setAmount(centsInput(b));
+        if (foreign) setAmountForeign(centsInput(f));
+      }}
+    >
+      {label}
+    </button>
+  );
 
   return (
     <Modal open={open} onClose={onClose} title={`Pagar tarjeta${card ? `: ${card.name}` : ''}`}>
       <form onSubmit={submit} className="space-y-3">
         {error && <ErrorBox message={error} />}
         <div className="flex flex-wrap gap-2 text-sm">
-          <Badge tone="red">Deuda total: {formatMoney(info?.debt ?? 0, currency)}</Badge>
+          <Badge tone="red">
+            Deuda: {formatMoney(info?.debt ?? 0, currency)}
+            {foreign ? ` + ${formatMoney(info?.debtForeign ?? 0, foreign)}` : ''}
+          </Badge>
           {info?.nextPayment && (
             <Badge tone="amber">
-              Próximo pago {formatShortDate(info.nextPayment.dueDate)}: {formatMoney(info.nextPayment.pending, currency)}
+              Próximo {formatShortDate(info.nextPayment.dueDate)}: {formatMoney(info.nextPayment.pending, currency)}
+              {foreign && info.nextPayment.pendingForeign ? ` + ${formatMoney(info.nextPayment.pendingForeign, foreign)}` : ''}
             </Badge>
           )}
         </div>
@@ -421,28 +492,42 @@ export function CardPaymentModal({ open, onClose, target }: { open: boolean; onC
             </select>
           </Field>
         )}
-        <div className="grid grid-cols-2 gap-3">
-          <Field label={`Monto (${currency})`}>
-            <input className="input text-right" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} required />
-            <div className="mt-1 flex gap-2 text-xs">
-              {info?.nextPayment && (
-                <button type="button" className="text-brand-600 hover:underline" onClick={() => setAmount(centsInput(info.nextPayment!.pending))}>
-                  Estado próximo
-                </button>
-              )}
-              {info && info.debt > 0 && (
-                <button type="button" className="text-brand-600 hover:underline" onClick={() => setAmount(centsInput(info.debt))}>
-                  Deuda total
-                </button>
-              )}
-            </div>
+        <div className={foreign ? 'grid grid-cols-3 gap-3' : 'grid grid-cols-2 gap-3'}>
+          <Field label={`Pago en ${currency}`}>
+            <input className="input text-right" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} />
           </Field>
-          <Field label="Fecha efectiva">
-            <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
-          </Field>
+          {foreign && (
+            <>
+              <Field label={`Abono en ${foreign}`}>
+                <input className="input text-right" inputMode="decimal" value={amountForeign} onChange={(e) => setAmountForeign(e.target.value)} />
+              </Field>
+              <Field label="Tasa real aplicada" hint={info?.sellRate ? `Vigente ${info.sellRate}` : undefined}>
+                <input className="input text-right" inputMode="decimal" value={rate} onChange={(e) => setRate(e.target.value)} />
+              </Field>
+            </>
+          )}
+        </div>
+        <div className="flex flex-wrap gap-3 text-xs">
+          {info?.nextPayment && shortcut('Estado próximo', info.nextPayment.pending, info.nextPayment.pendingForeign)}
+          {info && (info.debt > 0 || info.debtForeign > 0) && shortcut('Deuda total', info.debt, info.debtForeign)}
+        </div>
+        <Field label="Fecha efectiva">
+          <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
+        </Field>
+        <div className="rounded-lg bg-slate-50 px-3 py-2 text-sm dark:bg-slate-800/60">
+          <div className="flex justify-between">
+            <span>Se debitará del banco</span>
+            <strong className="tabular-nums">{formatMoney(bankTotal, currency)}</strong>
+          </div>
+          {foreign && fgnC > 0 && rateOk && (
+            <p className="mt-0.5 text-xs text-slate-500 tabular-nums">
+              {formatMoney(baseC, currency)} + {formatMoney(fgnC, foreign)} × {rateToString(rate4(rate.trim()))}
+              {info?.sellRate && rate4(rate.trim()) !== rate4(info.sellRate) && ' · la diferencia contra la tasa de cada consumo se registra como diferencial cambiario'}
+            </p>
+          )}
         </div>
         <p className="text-xs text-slate-500">
-          Reduce el saldo del banco y la deuda de la tarjeta, y liquida las cuotas más antiguas primero. No registra un gasto nuevo.
+          Reduce el banco y la deuda de cada sub-saldo, y liquida las cuotas más antiguas primero. No registra un gasto nuevo.
         </p>
         <div className="flex justify-end gap-2 pt-2">
           <Button type="button" onClick={onClose}>
@@ -455,6 +540,15 @@ export function CardPaymentModal({ open, onClose, target }: { open: boolean; onC
       </form>
     </Modal>
   );
+}
+
+interface CardSummaryLite {
+  id: string;
+  foreignCurrency: string | null;
+  sellRate: string | null;
+  debt: Cents;
+  debtForeign: Cents;
+  nextPayment: { dueDate: string; pending: Cents; pendingForeign: Cents; totalBase: Cents | null } | null;
 }
 
 export const cardStatusBadge: Record<string, { label: string; tone: 'slate' | 'green' | 'amber' | 'red' }> = {

@@ -4,6 +4,7 @@ import { badRequest, ok, readJson, route } from '@/lib/server/api';
 import { requireAdmin, requireUser } from '@/lib/server/auth';
 import { dbDate, isoOf } from '@/lib/server/serialize';
 import { currency, isoDate } from '@/lib/validation';
+import { effectiveSellRate, rate4, rateToString } from '@/lib/projection/fx';
 
 export const dynamic = 'force-dynamic';
 
@@ -20,6 +21,10 @@ export const GET = route(async () => {
       toCurrency: r.toCurrency,
       rate: r.rate.toString(),
       effectiveDate: isoOf(r.effectiveDate),
+      officialSellRate: r.officialSellRate ? Number(r.officialSellRate.toString()).toFixed(4) : null,
+      bankSpread: r.bankSpread ? Number(r.bankSpread.toString()).toFixed(4) : null,
+      effectiveSellRate: r.effectiveSellRate ? Number(r.effectiveSellRate.toString()).toFixed(4) : null,
+      source: r.source,
     })),
   );
 });
@@ -43,6 +48,20 @@ export const POST = route(async (req) => {
   await requireAdmin();
   const data = schema.parse(await readJson(req));
   if (data.fromCurrency === data.toCurrency) throw badRequest('Las monedas deben ser distintas');
+  // USD→HNL es además la tasa de las tarjetas: se guarda como oficial manual + spread global
+  let usdHnl = {};
+  if (data.fromCurrency === 'USD' && data.toCurrency === 'HNL') {
+    const settings = await prisma.appSetting.findUnique({ where: { id: 1 }, select: { fxBankSpread: true } });
+    const official = rate4(data.rate);
+    const spread = settings ? rate4(settings.fxBankSpread) : 1800;
+    usdHnl = {
+      officialBuyRate: rateToString(official),
+      officialSellRate: rateToString(official),
+      bankSpread: rateToString(spread),
+      effectiveSellRate: rateToString(effectiveSellRate(official, spread)),
+      source: 'MANUAL',
+    };
+  }
   const r = await prisma.exchangeRate.upsert({
     where: {
       fromCurrency_toCurrency_effectiveDate: {
@@ -51,12 +70,13 @@ export const POST = route(async (req) => {
         effectiveDate: dbDate(data.effectiveDate),
       },
     },
-    update: { rate: data.rate },
+    update: { rate: data.rate, ...usdHnl },
     create: {
       fromCurrency: data.fromCurrency,
       toCurrency: data.toCurrency,
       rate: data.rate,
       effectiveDate: dbDate(data.effectiveDate),
+      ...usdHnl,
     },
   });
   return ok({ id: r.id }, { status: 201 });

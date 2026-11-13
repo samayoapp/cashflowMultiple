@@ -31,6 +31,8 @@ export const GET = route(async (req) => {
       dueDate: isoOrNull(s.dueDate),
       expectedDate: isoOrNull(s.expectedDate),
       counterparty: s.counterparty,
+      currency: s.currency,
+      cardHint: s.cardHint,
       payload: s.payload,
       status: s.status,
       receivedAt: s.receivedAt.toISOString(),

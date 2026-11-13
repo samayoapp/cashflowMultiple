@@ -13,6 +13,8 @@ const schema = z.object({
   description: shortText(200),
   amount: positiveMoney,
   installments: z.coerce.number().int().min(1).max(MAX_INSTALLMENTS).default(1),
+  /** HNL / USD; por defecto la moneda de la entidad. */
+  currency: z.enum(['HNL', 'USD']).optional().nullable(),
   categoryId: id.optional().nullable(),
   counterpartyId: id.optional().nullable(),
   counterpartyName: z.string().trim().max(160).optional().nullable(),

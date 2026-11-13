@@ -295,12 +295,22 @@ export async function executeTransfer(args: {
 }
 
 /** Conciliación rápida: ajusta el saldo real de una cuenta al saldo del banco. */
-export async function reconcileAccount(args: { accountId: string; actualBalance: Cents; date: ISODate; userId: string }) {
+export async function reconcileAccount(args: {
+  accountId: string;
+  actualBalance: Cents;
+  date: ISODate;
+  userId: string;
+  /** Solo tarjetas bimoneda: sub-saldo a conciliar (null = moneda de la entidad). */
+  currency?: string | null;
+}) {
   return prisma.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT id FROM "Account" WHERE id = ${args.accountId} FOR UPDATE`;
     const account = await tx.account.findUnique({ where: { id: args.accountId } });
     if (!account) throw notFound('Cuenta no encontrada');
-    const agg = await tx.cashMovement.aggregate({ where: { accountId: account.id }, _sum: { amount: true } });
+    const entity = await tx.entity.findUniqueOrThrow({ where: { id: account.entityId }, select: { currency: true } });
+    const currency = args.currency && args.currency !== entity.currency ? args.currency : null;
+    if (currency && account.foreignCurrency !== currency) throw badRequest('La cuenta no maneja esa moneda');
+    const agg = await tx.cashMovement.aggregate({ where: { accountId: account.id, currency }, _sum: { amount: true } });
     const current = cents(agg._sum.amount);
     const diff = args.actualBalance - current;
     if (diff === 0) return { adjusted: false, difference: 0 };
@@ -310,8 +320,9 @@ export async function reconcileAccount(args: { accountId: string; actualBalance:
         accountId: account.id,
         type: 'ADJUSTMENT',
         amount: dec(diff),
+        currency,
         date: dbDate(args.date),
-        description: 'Ajuste por conciliación',
+        description: `Ajuste por conciliación${currency ? ` (${currency})` : ''}`,
         createdById: args.userId,
       },
     });

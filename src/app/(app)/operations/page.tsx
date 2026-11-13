@@ -458,6 +458,8 @@ function TransfersTab() {
 // ---------------------------------------------------------------- Tarjetas de crédito
 interface StatementItem {
   installmentId: string;
+  currency: string;
+  rateAtTx: string | null;
   description: string;
   categoryName: string | null;
   counterpartyName: string | null;
@@ -509,9 +511,16 @@ function CardsTab() {
       </div>
       {cards.map((c) => {
         const e = app.entityById.get(c.entityId);
-        const cur = e?.currency ?? 'HNL';
+        const cur = c.currency ?? e?.currency ?? 'HNL';
+        const fc = c.foreignCurrency;
         const usage = c.creditLimit ? Math.min(100, Math.round((c.debt / c.creditLimit) * 100)) : null;
+        const usageF = fc && c.creditLimitForeign ? Math.min(100, Math.round((c.debtForeign / c.creditLimitForeign) * 100)) : null;
         const statements = c.statements.filter((s) => showPaid || s.status !== 'PAID');
+        /** "L. x + $ y" según las monedas que tenga el monto */
+        const both = (m: { base: number; foreign: number }) =>
+          fc && m.foreign ? `${m.base ? `${formatMoney(m.base, cur)} + ` : ''}${formatMoney(m.foreign, fc)}` : formatMoney(m.base, cur);
+        const first = c.payments[0];
+        const lastGroup = !first ? [] : first.groupId ? c.payments.filter((p) => p.groupId === first.groupId) : [first];
         return (
           <Card key={c.id} className="p-0 sm:p-0">
             <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 p-4 dark:border-slate-800">
@@ -524,6 +533,13 @@ function CardsTab() {
                 </div>
                 <p className="mt-0.5 text-xs text-slate-500">
                   Corte día {c.statementDay} · pago día {c.paymentDueDay}
+                  {fc && (
+                    <>
+                      {' '}
+                      · <Badge tone="blue">Bimoneda {cur}/{fc}</Badge> · tasa {c.sellRate ?? '—'}
+                      {c.customSellRate ? ' (propia)' : ''}
+                    </>
+                  )}
                 </p>
               </div>
               <div className="flex gap-2">
@@ -532,29 +548,73 @@ function CardsTab() {
                 </Button>
                 <Button
                   variant="primary"
-                  disabled={c.debt <= 0}
+                  disabled={c.debt <= 0 && c.debtForeign <= 0}
                   onClick={() => setPay({ cardId: c.id, entityId: c.entityId, suggested: c.nextPayment?.pending })}
                 >
                   <CreditCard className="h-4 w-4" /> Registrar pago
                 </Button>
               </div>
             </div>
-            <div className="grid grid-cols-2 gap-4 p-4 lg:grid-cols-4">
-              <Stat label={`Consumo del ciclo${c.currentStatementDate ? ` (corte ${formatShortDate(c.currentStatementDate)})` : ''}`} value={formatMoney(c.currentCycle, cur)} />
-              <Stat label="Saldo total adeudado" value={formatMoney(c.debt, cur)} tone="red" sub={c.pendingInstallments !== c.debt ? `Cuotas por pagar: ${formatMoney(c.pendingInstallments, cur)}` : 'Incluye cuotas futuras'} />
-              <Stat
-                label="Próxima fecha de pago"
-                value={c.nextPayment ? formatShortDate(c.nextPayment.dueDate) : '—'}
-                sub={c.nextPayment ? formatMoney(c.nextPayment.pending, cur) : 'Sin pagos pendientes'}
-                tone={c.nextPayment && c.nextPayment.dueDate < app.today ? 'red' : undefined}
-              />
-              <Stat
-                label="Disponible"
-                value={c.available === null ? 'Sin límite' : formatMoney(c.available, cur)}
-                sub={usage === null ? undefined : `${usage}% usado de ${formatMoney(c.creditLimit!, cur)}`}
-                bar={usage}
-              />
-            </div>
+            {fc ? (
+              <div className="grid grid-cols-2 gap-4 p-4 lg:grid-cols-5">
+                <Stat label={`Saldo en ${cur}`} value={formatMoney(c.debt, cur)} tone="red" />
+                <Stat
+                  label={`Saldo en ${fc}`}
+                  value={formatMoney(c.debtForeign, fc)}
+                  tone="red"
+                  sub={c.debtForeignInBase === null ? 'Sin tipo de cambio' : `≈ ${formatMoney(c.debtForeignInBase, cur)} @ ${c.sellRate}`}
+                />
+                <Stat
+                  label={`Total consolidado a pagar (${cur})`}
+                  value={c.totalToPayBase === null ? '—' : formatMoney(c.totalToPayBase, cur)}
+                  tone="red"
+                  sub={`Ciclo actual: ${both(c.currentCycle)}`}
+                />
+                <Stat
+                  label="Próxima fecha de pago"
+                  value={c.nextPayment ? formatShortDate(c.nextPayment.dueDate) : '—'}
+                  sub={
+                    c.nextPayment
+                      ? `${both({ base: c.nextPayment.pending, foreign: c.nextPayment.pendingForeign })}${c.nextPayment.totalBase !== null && c.nextPayment.pendingForeign ? ` ≈ ${formatMoney(c.nextPayment.totalBase, cur)}` : ''}`
+                      : 'Sin pagos pendientes'
+                  }
+                  tone={c.nextPayment && c.nextPayment.dueDate < app.today ? 'red' : undefined}
+                />
+                <Stat
+                  label="Disponible"
+                  value={c.availableTotalBase === null ? 'Sin límite' : formatMoney(c.availableTotalBase, cur)}
+                  sub={[
+                    c.available !== null ? `${formatMoney(c.available, cur)}${usage !== null ? ` (${usage}% usado)` : ''}` : null,
+                    c.availableForeign !== null ? `${formatMoney(c.availableForeign, fc)}${usageF !== null ? ` (${usageF}% usado)` : ''}` : null,
+                  ]
+                    .filter(Boolean)
+                    .join(' · ') || undefined}
+                  bar={Math.max(usage ?? 0, usageF ?? 0) || (usage === null && usageF === null ? null : 0)}
+                />
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 gap-4 p-4 lg:grid-cols-4">
+                <Stat label={`Consumo del ciclo${c.currentStatementDate ? ` (corte ${formatShortDate(c.currentStatementDate)})` : ''}`} value={formatMoney(c.currentCycle.base, cur)} />
+                <Stat
+                  label="Saldo total adeudado"
+                  value={formatMoney(c.debt, cur)}
+                  tone="red"
+                  sub={c.pendingInstallments.base !== c.debt ? `Cuotas por pagar: ${formatMoney(c.pendingInstallments.base, cur)}` : 'Incluye cuotas futuras'}
+                />
+                <Stat
+                  label="Próxima fecha de pago"
+                  value={c.nextPayment ? formatShortDate(c.nextPayment.dueDate) : '—'}
+                  sub={c.nextPayment ? formatMoney(c.nextPayment.pending, cur) : 'Sin pagos pendientes'}
+                  tone={c.nextPayment && c.nextPayment.dueDate < app.today ? 'red' : undefined}
+                />
+                <Stat
+                  label="Disponible"
+                  value={c.available === null ? 'Sin límite' : formatMoney(c.available, cur)}
+                  sub={usage === null ? undefined : `${usage}% usado de ${formatMoney(c.creditLimit!, cur)}`}
+                  bar={usage}
+                />
+              </div>
+            )}
             {statements.length > 0 && (
               <div className="overflow-x-auto border-t border-slate-200 dark:border-slate-800">
                 <table className="w-full">
@@ -584,8 +644,16 @@ function CardsTab() {
                               </span>
                             </td>
                             <td className="td text-slate-500">{formatShortDate(s.statementDate)}</td>
-                            <td className="td num">{formatMoney(s.total, cur)}</td>
-                            <td className="td num font-semibold text-rose-700 dark:text-rose-400">{formatMoney(s.pending, cur)}</td>
+                            <td className="td num">{both(s.total)}</td>
+                            <td
+                              className="td num font-semibold text-rose-700 dark:text-rose-400"
+                              title={fc && s.pending.foreign && s.pendingTotalBase !== null ? `≈ ${formatMoney(s.pendingTotalBase, cur)} @ ${c.sellRate}` : undefined}
+                            >
+                              {s.pending.base + s.pending.foreign === 0 ? '—' : both(s.pending)}
+                              {fc && s.pending.foreign > 0 && s.pendingTotalBase !== null && (
+                                <div className="text-[11px] font-normal text-slate-500">≈ {formatMoney(s.pendingTotalBase, cur)}</div>
+                              )}
+                            </td>
                             <td className="td">
                               <Badge tone={st.tone}>{st.label}</Badge>
                             </td>
@@ -604,11 +672,12 @@ function CardsTab() {
                                     {formatShortDate(i.purchaseDate)}
                                     {i.categoryName && ` · ${i.categoryName}`}
                                     {i.counterpartyName && ` · ${i.counterpartyName}`}
-                                    {i.count > 1 && ` · compra total ${formatMoney(i.chargeAmount, cur)}`}
+                                    {i.count > 1 && ` · compra total ${formatMoney(i.chargeAmount, i.currency)}`}
+                                    {i.currency !== cur && i.rateAtTx && ` · tasa compra ${i.rateAtTx}`}
                                   </div>
                                 </td>
-                                <td className="td num text-slate-500">{formatMoney(i.amount, cur)}</td>
-                                <td className="td num">{i.pending ? formatMoney(i.pending, cur) : '—'}</td>
+                                <td className="td num text-slate-500">{formatMoney(i.amount, i.currency)}</td>
+                                <td className="td num">{i.pending ? formatMoney(i.pending, i.currency) : '—'}</td>
                                 <td className="td" />
                               </tr>
                             ))}
@@ -619,9 +688,16 @@ function CardsTab() {
                 </table>
               </div>
             )}
-            {c.payments.length > 0 && (
+            {lastGroup.length > 0 && (
               <p className="border-t border-slate-200 px-4 py-2 text-xs text-slate-500 dark:border-slate-800">
-                Último pago: {formatShortDate(c.payments[0].date)} · {formatMoney(c.payments[0].amount, cur)} desde {c.payments[0].fromAccountName}
+                Último pago: {formatShortDate(lastGroup[0].date)} desde {lastGroup[0].fromAccountName} ·{' '}
+                {lastGroup
+                  .map((p) =>
+                    p.currency !== cur
+                      ? `${formatMoney(p.amount, p.currency)} @ ${p.fxRateApplied} = ${formatMoney(p.bankAmount, cur)}${p.fxDifference ? ` (diferencial cambiario ${p.fxDifference > 0 ? '+' : ''}${formatMoney(p.fxDifference, cur)})` : ''}`
+                      : formatMoney(p.amount, cur),
+                  )
+                  .join(' + ')}
               </p>
             )}
           </Card>

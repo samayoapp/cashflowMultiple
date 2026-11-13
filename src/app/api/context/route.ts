@@ -5,6 +5,7 @@ import { getAllowedEntityIds, resolveContext, resolveWhatIf } from '@/lib/server
 import { entityDto } from '@/lib/server/dto';
 import { getSettings } from '@/lib/server/projection-data';
 import { todayInTz } from '@/lib/dates';
+import { getCurrentFx } from '@/lib/server/fx';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,10 +16,11 @@ export const GET = route(async (req) => {
   const ctx = await resolveContext(user, url.searchParams.get('ctx'));
   const allIds = await getAllowedEntityIds(user, { includeArchived: true });
   const activeIds = await getAllowedEntityIds(user);
-  const [entities, settings, pendingStaging] = await Promise.all([
+  const [entities, settings, pendingStaging, fx] = await Promise.all([
     prisma.entity.findMany({ where: { id: { in: allIds } }, orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }] }),
     getSettings(),
     prisma.stagingItem.count({ where: { entityId: { in: activeIds }, status: 'PENDING' } }),
+    getCurrentFx(),
   ]);
   return ok({
     user: { id: user.id, name: user.name, email: user.email, role: user.role },
@@ -28,5 +30,6 @@ export const GET = route(async (req) => {
     settings: { reportingCurrency: settings.reportingCurrency, timezone: settings.timezone },
     today: todayInTz(settings.timezone),
     pendingStaging,
+    fx,
   });
 });

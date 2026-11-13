@@ -5,7 +5,10 @@ import { requireUser } from '@/lib/server/auth';
 import { assertEntityAccess } from '@/lib/server/scope';
 import { resolveCounterparty } from '@/lib/server/catalog';
 import { cents, dbDate, dec, isoOrNull } from '@/lib/server/serialize';
-import { direction, isoDate, positiveMoney, priority } from '@/lib/validation';
+import { direction, id, isoDate, positiveMoney, priority } from '@/lib/validation';
+import { createCardCharge } from '@/lib/server/cards';
+import { getSettings } from '@/lib/server/projection-data';
+import { todayInTz } from '@/lib/dates';
 
 export const dynamic = 'force-dynamic';
 
@@ -21,6 +24,18 @@ const schema = z.discriminatedUnion('action', [
     expectedDate: isoDate.optional(),
     counterpartyName: z.string().trim().max(160).optional(),
     priority: priority.default('FLEXIBLE'),
+  }),
+  // Aprobar como consumo con tarjeta (en la moneda detectada: HNL o USD)
+  z.object({
+    action: z.literal('approve_card'),
+    cardAccountId: id,
+    installments: z.coerce.number().int().min(1).max(36).default(1),
+    categoryId: id.optional().nullable(),
+    purchaseDate: isoDate.optional(),
+    description: z.string().trim().min(1).max(200).optional(),
+    amount: positiveMoney.optional(),
+    currency: z.enum(['HNL', 'USD']).optional(),
+    counterpartyName: z.string().trim().max(160).optional(),
   }),
 ]);
 
@@ -41,7 +56,47 @@ export const POST = route<{ params: { id: string } }>(async (req, { params }) =>
     return ok({ status: 'REJECTED' });
   }
 
+  if (data.action === 'approve_card') {
+    const card = await prisma.account.findUnique({ where: { id: data.cardAccountId } });
+    if (!card || card.entityId !== item.entityId) throw badRequest('La tarjeta no pertenece a la entidad del elemento');
+    const description = data.description ?? item.description;
+    const amount = data.amount ?? (item.amount ? cents(item.amount) : null);
+    if (!description || !amount) throw badRequest('Completa descripción y monto antes de aprobar');
+    const settings = await getSettings();
+    const purchaseDate = data.purchaseDate ?? isoOrNull(item.dueDate) ?? todayInTz(settings.timezone);
+    const charge = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "StagingItem" WHERE id = ${item.id} FOR UPDATE`;
+      const fresh = await tx.stagingItem.findUniqueOrThrow({ where: { id: item.id } });
+      if (fresh.status !== 'PENDING') throw conflict('Este elemento ya fue revisado');
+      const r = await createCardCharge({
+        tx,
+        cardId: card.id,
+        purchaseDate,
+        description,
+        amount,
+        installments: data.installments,
+        currency: data.currency ?? item.currency,
+        categoryId: data.categoryId ?? null,
+        counterpartyName: data.counterpartyName ?? item.counterparty,
+        userId: user.id,
+      });
+      await tx.stagingItem.update({
+        where: { id: item.id },
+        data: { status: 'APPROVED', reviewedById: user.id, reviewedAt: new Date() },
+      });
+      return r.charge;
+    });
+    return ok({ status: 'APPROVED', cardChargeId: charge.id });
+  }
+
   const dir = data.direction ?? item.direction;
+  // Una CxC/CxP vive en la moneda de la entidad: si llegó en otra moneda, hay que corregir el monto
+  const entity = await prisma.entity.findUniqueOrThrow({ where: { id: item.entityId }, select: { currency: true } });
+  if (item.currency && item.currency !== entity.currency && data.amount === undefined) {
+    throw badRequest(
+      `El monto llegó en ${item.currency}: ingresa el equivalente en ${entity.currency} o apruébalo como consumo con tarjeta`,
+    );
+  }
   const description = data.description ?? item.description;
   const amount = data.amount ?? (item.amount ? cents(item.amount) : null);
   const dueDate = data.dueDate ?? isoOrNull(item.dueDate);

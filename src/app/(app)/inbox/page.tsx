@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Check, Inbox, X } from 'lucide-react';
 import { useApp } from '@/components/AppContext';
 import { Badge, Button, Card, EmptyState, ErrorBox, Field, Loading, Modal, Tabs, useToast } from '@/components/ui';
@@ -9,6 +9,9 @@ import { centsInput, parseMoneyInput } from '@/components/forms';
 import { api, emitDataChanged, useApi } from '@/lib/client/api';
 import { formatMoney } from '@/lib/money';
 import { formatShortDate } from '@/lib/dates';
+import { convertPair, rate4 } from '@/lib/projection/fx';
+import { INSTALLMENT_OPTIONS } from '@/components/cards';
+import type { AccountDto } from '@/lib/server/dto';
 
 interface StagingRow {
   id: string;
@@ -21,6 +24,8 @@ interface StagingRow {
   dueDate: string | null;
   expectedDate: string | null;
   counterparty: string | null;
+  currency: 'HNL' | 'USD' | null;
+  cardHint: string | null;
   payload: unknown;
   status: 'PENDING' | 'APPROVED' | 'REJECTED';
   receivedAt: string;
@@ -36,13 +41,49 @@ export default function InboxPage() {
   const [review, setReview] = useState<StagingRow | null>(null);
   const [form, setForm] = useState({ direction: 'IN', description: '', amount: '', dueDate: '', expectedDate: '', counterpartyName: '' });
   const [saving, setSaving] = useState(false);
+  const [mode, setMode] = useState<'obligation' | 'card'>('obligation');
+  const [cardForm, setCardForm] = useState({ cardAccountId: '', installments: 1, categoryId: '', purchaseDate: '', currency: '', amount: '' });
+  const reviewEntity = review ? app.entityById.get(review.entityId) : undefined;
+  const accounts = useApi<AccountDto[]>(review ? `/api/accounts?ctx=${review.entityId}` : null);
+  const catalog = useApi<{ categories: { id: string; name: string; direction: 'IN' | 'OUT' }[] }>(review ? `/api/catalog?ctx=${review.entityId}` : null);
+  const cards = useMemo(() => (accounts.data ?? []).filter((a) => a.type === 'CREDIT_CARD' && !a.archived), [accounts.data]);
+  const selectedCard = cards.find((c) => c.id === cardForm.cardAccountId);
+
+  // Preselecciona la tarjeta que coincide con la pista recibida (o la primera)
+  useEffect(() => {
+    if (!review || !cards.length || cardForm.cardAccountId) return;
+    const hint = review.cardHint?.toLowerCase();
+    const match = hint ? cards.find((c) => c.name.toLowerCase().includes(hint) || hint.includes(c.name.toLowerCase())) : undefined;
+    setCardForm((f) => ({ ...f, cardAccountId: (match ?? cards[0]).id }));
+    if (match) setMode('card');
+  }, [review, cards, cardForm.cardAccountId]);
+
+  /** Monto convertido a la moneda de la entidad si llegó en otra (a la tasa vigente). */
+  function toEntityCurrency(row: StagingRow): { amount: string; note: string | null } {
+    const entCur = app.entityById.get(row.entityId)?.currency ?? 'HNL';
+    if (!row.amount) return { amount: '', note: null };
+    if (!row.currency || row.currency === entCur) return { amount: centsInput(row.amount), note: null };
+    const r = app.fx?.effectiveSellRate;
+    if (!r || !['HNL', 'USD'].includes(entCur)) return { amount: '', note: `Llegó en ${row.currency}: ingresa el equivalente en ${entCur}` };
+    const conv = convertPair(row.amount, row.currency, entCur, rate4(r));
+    return { amount: centsInput(conv), note: `Convertido de ${formatMoney(row.amount, row.currency)} @ ${r}` };
+  }
 
   function open(row: StagingRow) {
     setReview(row);
+    setMode('obligation');
+    setCardForm({
+      cardAccountId: '',
+      installments: 1,
+      categoryId: '',
+      purchaseDate: row.dueDate ?? app.today,
+      currency: row.currency ?? '',
+      amount: row.amount ? centsInput(row.amount) : '',
+    });
     setForm({
       direction: row.direction ?? 'IN',
       description: row.description ?? '',
-      amount: row.amount ? centsInput(row.amount) : '',
+      amount: toEntityCurrency(row).amount,
       dueDate: row.dueDate ?? app.today,
       expectedDate: row.expectedDate ?? row.dueDate ?? app.today,
       counterpartyName: row.counterparty ?? '',
@@ -52,7 +93,24 @@ export default function InboxPage() {
   async function decide(row: StagingRow, action: 'approve' | 'reject') {
     setSaving(true);
     try {
-      if (action === 'approve') {
+      if (action === 'approve' && mode === 'card') {
+        const amount = parseMoneyInput(cardForm.amount);
+        if (!amount) throw new Error('Monto inválido');
+        if (!cardForm.cardAccountId) throw new Error('Selecciona la tarjeta');
+        await api(`/api/staging/${row.id}`, {
+          body: {
+            action: 'approve_card',
+            cardAccountId: cardForm.cardAccountId,
+            installments: cardForm.installments,
+            categoryId: cardForm.categoryId || null,
+            purchaseDate: cardForm.purchaseDate || undefined,
+            description: form.description || undefined,
+            counterpartyName: form.counterpartyName || undefined,
+            amount,
+            currency: cardForm.currency || undefined,
+          },
+        });
+      } else if (action === 'approve') {
         const amount = parseMoneyInput(form.amount);
         if (!amount) throw new Error('Monto inválido');
         await api(`/api/staging/${row.id}`, {
@@ -136,7 +194,15 @@ export default function InboxPage() {
                         {s.direction === 'IN' ? <Badge tone="green">Por cobrar</Badge> : s.direction === 'OUT' ? <Badge tone="red">Por pagar</Badge> : <Badge tone="amber">Sin tipo</Badge>}
                       </td>
                       <td className="td">{s.dueDate ? formatShortDate(s.dueDate) : '—'}</td>
-                      <td className="td num font-semibold">{s.amount ? formatMoney(s.amount, e?.currency ?? 'HNL') : '—'}</td>
+                      <td className="td num font-semibold">
+                        {s.amount ? formatMoney(s.amount, s.currency ?? e?.currency ?? 'HNL') : '—'}
+                        {s.currency && s.currency !== e?.currency && (
+                          <div>
+                            <Badge tone="blue">{s.currency}</Badge>
+                          </div>
+                        )}
+                        {s.cardHint && <div className="text-[11px] font-normal text-slate-500">Tarjeta: {s.cardHint}</div>}
+                      </td>
                       <td className="td">
                         {s.status === 'PENDING' && (
                           <div className="flex justify-end gap-1">
@@ -169,7 +235,7 @@ export default function InboxPage() {
               Rechazar
             </Button>
             <Button variant="primary" loading={saving} onClick={() => review && decide(review, 'approve')}>
-              Aprobar e integrar al flujo
+              {mode === 'card' ? 'Aprobar como consumo con tarjeta' : 'Aprobar e integrar al flujo'}
             </Button>
           </>
         }
@@ -177,29 +243,53 @@ export default function InboxPage() {
         {review && (
           <div className="grid gap-4 md:grid-cols-2">
             <div className="space-y-3">
-              <Field label="Tipo">
-                <select className="input" value={form.direction} onChange={(e) => setForm({ ...form, direction: e.target.value })}>
-                  <option value="IN">Cuenta por cobrar</option>
-                  <option value="OUT">Cuenta por pagar</option>
-                </select>
-              </Field>
+              <Tabs<'obligation' | 'card'>
+                tabs={[
+                  { id: 'obligation', label: 'CxC / CxP' },
+                  { id: 'card', label: 'Consumo con tarjeta' },
+                ]}
+                value={mode}
+                onChange={setMode}
+              />
+              {mode === 'obligation' && (
+                <Field label="Tipo">
+                  <select className="input" value={form.direction} onChange={(e) => setForm({ ...form, direction: e.target.value })}>
+                    <option value="IN">Cuenta por cobrar</option>
+                    <option value="OUT">Cuenta por pagar</option>
+                  </select>
+                </Field>
+              )}
               <Field label="Descripción">
                 <input className="input" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
               </Field>
               <Field label="Contraparte">
                 <input className="input" value={form.counterpartyName} onChange={(e) => setForm({ ...form, counterpartyName: e.target.value })} />
               </Field>
-              <Field label={`Monto (${app.entityById.get(review.entityId)?.currency ?? ''})`}>
-                <input className="input text-right" inputMode="decimal" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} />
-              </Field>
-              <div className="grid grid-cols-2 gap-3">
-                <Field label="Vencimiento">
-                  <input className="input" type="date" value={form.dueDate} onChange={(e) => setForm({ ...form, dueDate: e.target.value })} />
-                </Field>
-                <Field label="Fecha esperada">
-                  <input className="input" type="date" value={form.expectedDate} onChange={(e) => setForm({ ...form, expectedDate: e.target.value })} />
-                </Field>
-              </div>
+              {mode === 'card' ? (
+                <CardApprovalFields
+                  cards={cards}
+                  loaded={Boolean(accounts.data)}
+                  entityCurrency={reviewEntity?.currency ?? 'HNL'}
+                  selectedCard={selectedCard}
+                  categories={(catalog.data?.categories ?? []).filter((c) => c.direction === 'OUT')}
+                  value={cardForm}
+                  onChange={setCardForm}
+                />
+              ) : (
+                <>
+                  <Field label={`Monto (${app.entityById.get(review.entityId)?.currency ?? ''})`} hint={toEntityCurrency(review).note ?? undefined}>
+                    <input className="input text-right" inputMode="decimal" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} />
+                  </Field>
+                  <div className="grid grid-cols-2 gap-3">
+                    <Field label="Vencimiento">
+                      <input className="input" type="date" value={form.dueDate} onChange={(e) => setForm({ ...form, dueDate: e.target.value })} />
+                    </Field>
+                    <Field label="Fecha esperada">
+                      <input className="input" type="date" value={form.expectedDate} onChange={(e) => setForm({ ...form, expectedDate: e.target.value })} />
+                    </Field>
+                  </div>
+                </>
+              )}
             </div>
             <div>
               <span className="label">Datos recibidos</span>
@@ -209,5 +299,77 @@ export default function InboxPage() {
         )}
       </Modal>
     </div>
+  );
+}
+
+type CardForm = { cardAccountId: string; installments: number; categoryId: string; purchaseDate: string; currency: string; amount: string };
+
+/** Campos para aprobar un elemento de la bandeja como consumo con tarjeta (en su moneda original). */
+function CardApprovalFields({
+  cards,
+  loaded,
+  entityCurrency,
+  selectedCard,
+  categories,
+  value,
+  onChange,
+}: {
+  cards: AccountDto[];
+  loaded: boolean;
+  entityCurrency: string;
+  selectedCard: AccountDto | undefined;
+  categories: { id: string; name: string }[];
+  value: CardForm;
+  onChange: (v: CardForm) => void;
+}) {
+  if (loaded && cards.length === 0) return <ErrorBox message="La entidad no tiene tarjetas de crédito." />;
+  return (
+    <>
+      <Field label="Tarjeta">
+        <select className="input" value={value.cardAccountId} onChange={(e) => onChange({ ...value, cardAccountId: e.target.value })}>
+          {cards.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.name}
+              {c.foreignCurrency ? ' (bimoneda)' : ''}
+            </option>
+          ))}
+        </select>
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Monto">
+          <div className="flex gap-1">
+            <select className="input w-20 shrink-0 px-2" value={value.currency || entityCurrency} onChange={(e) => onChange({ ...value, currency: e.target.value })}>
+              <option value={entityCurrency}>{entityCurrency}</option>
+              {selectedCard?.foreignCurrency && <option value={selectedCard.foreignCurrency}>{selectedCard.foreignCurrency}</option>}
+            </select>
+            <input className="input min-w-0 text-right" inputMode="decimal" value={value.amount} onChange={(e) => onChange({ ...value, amount: e.target.value })} />
+          </div>
+        </Field>
+        <Field label="Cuotas">
+          <select className="input" value={value.installments} onChange={(e) => onChange({ ...value, installments: Number(e.target.value) })}>
+            {INSTALLMENT_OPTIONS.map((n) => (
+              <option key={n} value={n}>
+                {n === 1 ? 'Contado (1)' : `${n} cuotas`}
+              </option>
+            ))}
+          </select>
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Categoría">
+          <select className="input" value={value.categoryId} onChange={(e) => onChange({ ...value, categoryId: e.target.value })}>
+            <option value="">Sin categoría</option>
+            {categories.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Fecha de compra">
+          <input className="input" type="date" value={value.purchaseDate} onChange={(e) => onChange({ ...value, purchaseDate: e.target.value })} />
+        </Field>
+      </div>
+    </>
   );
 }

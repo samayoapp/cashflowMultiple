@@ -167,7 +167,13 @@ export function AccountFormModal({ open, onClose }: { open: boolean; onClose: ()
   const [statementDay, setStatementDay] = useState('15');
   const [paymentDueDay, setPaymentDueDay] = useState('5');
   const [payFrom, setPayFrom] = useState('');
+  const [dual, setDual] = useState(false);
+  const [limitForeign, setLimitForeign] = useState('');
+  const [openingForeign, setOpeningForeign] = useState('0');
+  const [customRate, setCustomRate] = useState('');
   const isCardType = type === 'CREDIT_CARD';
+  const entityCurrency = app.entityById.get(entityId)?.currency ?? '';
+  const foreignCurrency = entityCurrency === 'HNL' ? 'USD' : entityCurrency === 'USD' ? 'HNL' : null;
   const entityAccounts = useApi<AccountDto[]>(open && isCardType && entityId ? `/api/accounts?ctx=${entityId}` : null);
   const payable = useMemo(() => liquidAccounts(entityAccounts.data), [entityAccounts.data]);
 
@@ -184,6 +190,10 @@ export function AccountFormModal({ open, onClose }: { open: boolean; onClose: ()
     setStatementDay('15');
     setPaymentDueDay('5');
     setPayFrom('');
+    setDual(false);
+    setLimitForeign('');
+    setOpeningForeign('0');
+    setCustomRate('');
   }, [open, defaultEntity, app.today, setError]);
 
   async function submit(e: React.FormEvent) {
@@ -195,6 +205,12 @@ export function AccountFormModal({ open, onClose }: { open: boolean; onClose: ()
     const sd = Number(statementDay);
     const pd = Number(paymentDueDay);
     if (isCardType && (!(sd >= 1 && sd <= 31) || !(pd >= 1 && pd <= 31))) return setError('Los días deben estar entre 1 y 31');
+    const isDual = isCardType && dual && Boolean(foreignCurrency);
+    const limF = isDual && limitForeign.trim() ? parseMoneyInput(limitForeign) : null;
+    if (isDual && limitForeign.trim() && limF === null) return setError(`Límite en ${foreignCurrency} inválido`);
+    const openF = isDual ? parseMoneyInput(openingForeign || '0') : '0';
+    if (openF === null || Number(openF) < 0) return setError(`Deuda en ${foreignCurrency} inválida`);
+    if (isDual && customRate.trim() && !/^\d+(\.\d{1,4})?$/.test(customRate.trim())) return setError('Tasa propia inválida (hasta 4 decimales)');
     const body = {
       entityId,
       name,
@@ -203,6 +219,9 @@ export function AccountFormModal({ open, onClose }: { open: boolean; onClose: ()
       openingBalance: amount,
       openingDate: date,
       ...(isCardType ? { creditLimit: limit, statementDay: sd, paymentDueDay: pd, defaultPaymentAccountId: payFrom || null } : {}),
+      ...(isDual
+        ? { dualCurrency: true, creditLimitForeign: limF, openingDebtForeign: openF, customSellRate: customRate.trim() || null }
+        : {}),
     };
     const ok = await run(() => api('/api/accounts', { body }), isCardType ? 'Tarjeta creada' : 'Cuenta creada');
     if (ok) onClose();
@@ -240,10 +259,30 @@ export function AccountFormModal({ open, onClose }: { open: boolean; onClose: ()
               <Field label="Día límite de pago">
                 <input className="input text-right" type="number" min={1} max={31} value={paymentDueDay} onChange={(e) => setPaymentDueDay(e.target.value)} required />
               </Field>
-              <Field label="Límite (opcional)">
+              <Field label={`Límite ${entityCurrency} (opcional)`}>
                 <input className="input text-right" inputMode="decimal" value={creditLimit} onChange={(e) => setCreditLimit(e.target.value)} />
               </Field>
             </div>
+            {foreignCurrency && (
+              <Toggle
+                checked={dual}
+                onChange={setDual}
+                label={<span className="text-sm">Bimoneda: también acepta consumos en {foreignCurrency}</span>}
+              />
+            )}
+            {dual && foreignCurrency && (
+              <div className="grid grid-cols-3 gap-3">
+                <Field label={`Límite ${foreignCurrency} (opcional)`}>
+                  <input className="input text-right" inputMode="decimal" value={limitForeign} onChange={(e) => setLimitForeign(e.target.value)} />
+                </Field>
+                <Field label={`Deuda actual ${foreignCurrency}`}>
+                  <input className="input text-right" inputMode="decimal" value={openingForeign} onChange={(e) => setOpeningForeign(e.target.value)} />
+                </Field>
+                <Field label="Tasa propia (opcional)" hint={`Global: ${app.fx?.effectiveSellRate ?? '—'}`}>
+                  <input className="input text-right" inputMode="decimal" value={customRate} onChange={(e) => setCustomRate(e.target.value)} placeholder={app.fx?.effectiveSellRate} />
+                </Field>
+              </div>
+            )}
             <Field label="Cuenta de pago por defecto (opcional)">
               <select className="input" value={payFrom} onChange={(e) => setPayFrom(e.target.value)}>
                 <option value="">Ninguna</option>
@@ -261,7 +300,7 @@ export function AccountFormModal({ open, onClose }: { open: boolean; onClose: ()
           </div>
         )}
         <div className="grid grid-cols-2 gap-3">
-          <Field label={`${isCardType ? 'Deuda actual' : 'Saldo actual'} (${app.entityById.get(entityId)?.currency ?? ''})`} hint={isCardType ? 'Se proyecta en la próxima fecha de pago' : undefined}>
+          <Field label={`${isCardType ? 'Deuda actual' : 'Saldo actual'} (${entityCurrency})`} hint={isCardType ? 'Se proyecta en la próxima fecha de pago' : undefined}>
             <input className="input text-right" inputMode="decimal" value={opening} onChange={(e) => setOpening(e.target.value)} />
           </Field>
           <Field label="Fecha del saldo">

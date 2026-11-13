@@ -6,6 +6,8 @@ const nextConfig = {
   // No usamos next/image con optimización; se sirve la imagen original.
   images: { unoptimized: true },
   experimental: {
+    // Tarea diaria del tipo de cambio (src/instrumentation.ts)
+    instrumentationHook: true,
     // Prisma y bcrypt solo en servidor
     serverComponentsExternalPackages: ['@prisma/client', 'bcryptjs', 'pg'],
   },

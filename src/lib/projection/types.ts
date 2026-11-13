@@ -21,6 +21,10 @@ export interface EngineAccountBalance {
   balance: Cents;
   /** Sin valor = cuenta líquida. Las tarjetas no suman a la caja real (saldo negativo = deuda). */
   kind?: 'LIQUID' | 'CREDIT_CARD';
+  /** Moneda del saldo si difiere de la de la entidad (sub-saldo en $ de una tarjeta bimoneda). */
+  currency?: string | null;
+  /** Tasa de venta USD→HNL de la tarjeta, en diezmilésimas (27.1672 -> 271672). */
+  fxRate4?: number | null;
 }
 
 /** Cuota pendiente de un consumo con tarjeta, asignada a su fecha límite de pago. */
@@ -36,10 +40,22 @@ export interface EngineCardInstallment {
   purchaseDate: ISODate;
   number: number;
   count: number;
-  amount: Cents;
+  amount: Cents; // en la moneda de la cuota
   settled: Cents;
   statementDate: ISODate;
   dueDate: ISODate;
+  /** Moneda de la cuota; null/igual a la entidad = moneda local. */
+  currency?: string | null;
+  /** Tasa de venta USD→HNL de la tarjeta (diezmilésimas), para convertir la parte extranjera. */
+  fxRate4?: number | null;
+}
+
+/** Desglose del pago de tarjeta: parte local + parte extranjera convertida a la tasa vigente. */
+export interface CardBreakdown {
+  base: Cents;
+  foreign: Cents;
+  foreignCurrency: string | null;
+  rate4: number | null;
 }
 
 export interface CardStatementDetail {
@@ -51,7 +67,9 @@ export interface CardStatementDetail {
   purchaseDate: ISODate;
   number: number;
   count: number;
-  /** Pendiente en moneda de la entidad. */
+  /** Moneda original de la cuota. */
+  currency: string;
+  /** Pendiente en la moneda original de la cuota. */
   pendingNative: Cents;
 }
 
@@ -154,6 +172,7 @@ export interface ProjectedItem {
   /** Solo CARD_STATEMENT: tarjeta y consumos/cuotas que forman el pago. */
   cardAccountId?: string;
   cardDetails?: CardStatementDetail[];
+  cardBreakdown?: CardBreakdown;
 }
 
 export interface EntityFlow {

@@ -5,13 +5,15 @@
  * Crea: segunda entidad en USD, cuentas, CxC/CxP (con vencidas y abonos),
  * recurrencias, una transferencia inter-entidad, tasas HNL/USD/EUR y partidas hipotéticas.
  * - Tarjeta demo "Visa Empresarial (demo)" en la Entidad Base (solo si no existe):
- *   consumos categorizados, una compra a 6 cuotas, deuda inicial y un pago parcial.
+ *   bimoneda (L. / $), consumos categorizados, una compra a 6 cuotas, un consumo en USD a 3 cuotas,
+ *   deuda inicial y un pago parcial. Sincroniza el tipo de cambio del día si falta.
  */
 import { PrismaClient, type Direction, type Priority } from '@prisma/client';
 import { addDays, todayInTz } from '../src/lib/dates';
 import { centsToDecimalString } from '../src/lib/money';
 import { createTransfer, registerPayment } from '../src/lib/server/services';
 import { createCardCharge, createOpeningDebt, payCreditCard } from '../src/lib/server/cards';
+import { getCurrentFx, syncIfMissing } from '../src/lib/server/fx';
 
 const prisma = new PrismaClient();
 const DEMO_NAME = 'Publimatec Digital (demo)';
@@ -198,6 +200,8 @@ async function seedCardDemo(today: string, userId: string) {
         statementDay: 15,
         paymentDueDay: 5,
         defaultPaymentAccountId: bank?.id ?? null,
+        foreignCurrency: base.currency === 'HNL' ? 'USD' : null,
+        creditLimitForeign: base.currency === 'HNL' ? money(5000) : null,
       },
     });
     await createOpeningDebt(tx, c, 8500_00, today, userId);
@@ -234,6 +238,35 @@ async function seedCardDemo(today: string, userId: string) {
     counterpartyName: 'Jetstereo',
     userId,
   });
+  if (card.foreignCurrency) {
+    const fx = (await syncIfMissing().catch(() => null), await getCurrentFx());
+    if (fx) {
+      await createCardCharge({
+        cardId: card.id,
+        purchaseDate: addDays(today, -4),
+        description: 'Suscripción anual Figma (3 cuotas)',
+        amount: 540_00,
+        installments: 3,
+        currency: 'USD',
+        categoryId: await category('Software'),
+        counterpartyName: 'Figma',
+        userId,
+      });
+      await createCardCharge({
+        cardId: card.id,
+        purchaseDate: addDays(today, -1),
+        description: 'Servidores AWS',
+        amount: 86_40,
+        installments: 1,
+        currency: 'USD',
+        categoryId: await category('Software'),
+        counterpartyName: 'Amazon Web Services',
+        userId,
+      });
+    } else {
+      console.log('  !! Sin tipo de cambio disponible: se omiten los consumos demo en USD');
+    }
+  }
   if (bank) {
     await payCreditCard({ cardId: card.id, fromAccountId: bank.id, amount: 5000_00, date: today, note: 'Abono demo', userId });
   }

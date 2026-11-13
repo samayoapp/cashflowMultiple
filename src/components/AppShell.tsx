@@ -23,6 +23,7 @@ import {
 import { useApp } from './AppContext';
 import { cn, Toggle } from './ui';
 import { EntityFormModal } from './forms';
+import { FxIndicator } from './FxIndicator';
 import { api } from '@/lib/client/api';
 
 const NAV = [
@@ -230,6 +231,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               label={<span className="font-medium">Simulación</span>}
             />
           </div>
+          <FxIndicator />
           <div className="ml-auto flex items-center gap-1">
             <Link href="/inbox" className="relative rounded-lg p-2 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="Bandeja externa">
               <Bell className="h-4 w-4" />

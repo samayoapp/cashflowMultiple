@@ -362,3 +362,70 @@ describe('tarjetas de crédito (cuenta puente)', () => {
     expect(it0.amountNative).toBe(100_00);
   });
 });
+
+describe('tarjetas bimoneda (HNL / USD)', () => {
+  const R = 271672; // 27.1672 = 26.9872 oficial + 0.18 spread
+  const ci = (p: Partial<EngineCardInstallment> & { id: string }): EngineCardInstallment => ({
+    chargeId: 'ch-' + p.id,
+    entityId: 'A',
+    cardAccountId: 'visa',
+    cardName: 'Visa',
+    description: p.id,
+    purchaseDate: '2026-11-01',
+    number: 1,
+    count: 1,
+    amount: 1000_00,
+    settled: 0,
+    statementDate: '2026-11-15',
+    dueDate: '2026-12-05',
+    currency: 'HNL',
+    fxRate4: R,
+    ...p,
+  });
+
+  it('salida proyectada = saldo HNL + saldo USD × tasa de venta efectiva', () => {
+    const r = project(
+      input({
+        cardInstallments: [
+          ci({ id: 'insumos', amount: 2000_00 }),
+          ci({ id: 'aws', amount: 60_00, currency: 'USD' }),
+          ci({ id: 'adobe', amount: 40_00, currency: 'USD', number: 1, count: 3 }),
+        ],
+      }),
+    );
+    const st = r.items.find((i) => i.source === 'CARD_STATEMENT')!;
+    // 2000 + 100 × 27.1672 = 4716.72
+    expect(st.amount).toBe(4716_72);
+    expect(st.cardBreakdown).toEqual({ base: 2000_00, foreign: 100_00, foreignCurrency: 'USD', rate4: R });
+    expect(st.cardDetails!.find((d) => d.description === 'aws')).toMatchObject({ currency: 'USD', pendingNative: 60_00 });
+  });
+
+  it('un cambio de tasa recalcula la salida', () => {
+    const base = input({ cardInstallments: [ci({ id: 'aws', amount: 100_00, currency: 'USD' })] });
+    const a = project(base).items.find((i) => i.source === 'CARD_STATEMENT')!;
+    const b = project({ ...base, cardInstallments: [ci({ id: 'aws', amount: 100_00, currency: 'USD', fxRate4: 275000 })] }).items.find(
+      (i) => i.source === 'CARD_STATEMENT',
+    )!;
+    expect(a.amount).toBe(2716_72);
+    expect(b.amount).toBe(2750_00);
+  });
+
+  it('deuda flotante convierte el sub-saldo en dólares; la caja no cambia', () => {
+    const r = project(
+      input({
+        balances: [
+          { accountId: 'acc1', entityId: 'A', balance: 50_000_00 },
+          { accountId: 'visa', entityId: 'A', balance: -1000_00, kind: 'CREDIT_CARD' },
+          { accountId: 'visa', entityId: 'A', balance: -200_00, kind: 'CREDIT_CARD', currency: 'USD', fxRate4: R },
+        ],
+      }),
+    );
+    expect(r.kpis.cashToday).toBe(50_000_00);
+    expect(r.kpis.cardDebt).toBe(1000_00 + 5433_44); // 200 × 27.1672 = 5433.44
+  });
+
+  it('sin tasa de tarjeta usa la del consolidado (USD→HNL 25)', () => {
+    const r = project(input({ cardInstallments: [ci({ id: 'x', amount: 10_00, currency: 'USD', fxRate4: null })] }));
+    expect(r.items.find((i) => i.source === 'CARD_STATEMENT')!.amount).toBe(250_00);
+  });
+});

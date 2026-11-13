@@ -2,6 +2,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { EntityDto } from '@/lib/server/dto';
+import type { CurrentFx } from '@/lib/server/fx';
 import { api, CONTEXT_CHANGED_EVENT, DATA_CHANGED_EVENT, setCookie } from '@/lib/client/api';
 
 export interface ContextPayload {
@@ -12,6 +13,8 @@ export interface ContextPayload {
   settings: { reportingCurrency: string; timezone: string };
   today: string;
   pendingStaging: number;
+  /** Tipo de cambio USD→HNL vigente (null si nunca se ha registrado). */
+  fx: CurrentFx | null;
 }
 
 interface AppState extends ContextPayload {
