@@ -33,6 +33,11 @@ export const cardFields = {
     }),
   /** Deuda inicial en la moneda extranjera (positivo). */
   openingDebtForeign: nonNegativeMoney.optional(),
+  /** Consumos hechos después del último corte (aún no facturados), por moneda. */
+  openingUnbilled: nonNegativeMoney.optional(),
+  openingUnbilledForeign: nonNegativeMoney.optional(),
+  /** Tope de gasto por ciclo (moneda de la entidad). */
+  cycleBudget: nonNegativeMoney.optional().nullable(),
 };
 
 /** Moneda extranjera de una tarjeta bimoneda según la moneda de la entidad (solo par HNL/USD). */

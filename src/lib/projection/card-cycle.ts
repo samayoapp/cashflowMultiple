@@ -1,4 +1,4 @@
-import { addMonths, type ISODate } from '@/lib/dates';
+import { addDays, addMonths, diffDays, type ISODate } from '@/lib/dates';
 import type { Cents } from '@/lib/money';
 
 /**
@@ -136,4 +136,58 @@ export function installmentDates(
   }
   const statementDate = dayInMonth(statementCloseFor(purchase, card.statementDay), card.statementDay, number - 1);
   return { statementDate, dueDate: dueDateFor(statementDate, card.paymentDueDay) };
+}
+
+/** Ciclo de facturación en curso: del día siguiente al último corte hasta el próximo corte (inclusive). */
+export interface CycleProgress {
+  start: ISODate;
+  close: ISODate;
+  dueDate: ISODate;
+  daysElapsed: number;
+  daysTotal: number;
+  daysLeft: number;
+  /** Lo que se va a facturar en el corte: compras nuevas + cuotas de compras anteriores. */
+  accumulated: Cents;
+  /** Proyección al corte si se sigue gastando al mismo ritmo diario (las cuotas fijas no se extrapolan). */
+  projectedAtClose: Cents;
+  /** Presupuesto del ciclo y cuánto queda; null si no hay presupuesto. */
+  budget: Cents | null;
+  budgetLeft: Cents | null;
+  /** Monto diario que se puede gastar hasta el corte sin pasarse del presupuesto. */
+  dailyAllowance: Cents | null;
+}
+
+export function cycleProgress(args: {
+  today: ISODate;
+  card: CardCycleConfig;
+  /** Compras hechas dentro del ciclo (primera cuota o pago único). */
+  newSpend: Cents;
+  /** Cuotas de compras anteriores que caen en este corte. */
+  carried: Cents;
+  budget?: Cents | null;
+}): CycleProgress {
+  const close = statementCloseFor(args.today, args.card.statementDay);
+  const start = addDays(dayInMonth(close, args.card.statementDay, -1), 1);
+  const daysTotal = diffDays(close, start) + 1;
+  const daysElapsed = Math.min(Math.max(diffDays(args.today, start) + 1, 1), daysTotal);
+  const daysLeft = daysTotal - daysElapsed;
+  const accumulated = args.newSpend + args.carried;
+  const projectedAtClose = args.carried + Math.round((args.newSpend * daysTotal) / daysElapsed);
+  const budget = args.budget ?? null;
+  const budgetLeft = budget === null ? null : budget - accumulated;
+  const dailyAllowance =
+    budgetLeft === null ? null : Math.max(0, Math.floor(budgetLeft / Math.max(daysLeft + 1, 1)));
+  return {
+    start,
+    close,
+    dueDate: dueDateFor(close, args.card.paymentDueDay),
+    daysElapsed,
+    daysTotal,
+    daysLeft,
+    accumulated,
+    projectedAtClose,
+    budget,
+    budgetLeft,
+    dailyAllowance,
+  };
 }

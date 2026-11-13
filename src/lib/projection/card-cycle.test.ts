@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   allocatePayment,
   buildSchedule,
+  cycleProgress,
   dueDateFor,
   installmentDates,
   nextDayOnOrAfter,
@@ -131,5 +132,37 @@ describe('re-programación de cuotas', () => {
       dueDate: '2026-11-24',
     });
     expect(installmentDates('2026-11-13', 1, VISA, true).dueDate).toBe('2026-12-05');
+  });
+});
+
+describe('ciclo en curso', () => {
+  const CONECTA = { statementDay: 3, paymentDueDay: 24 };
+  it('rango, días y fecha de pago', () => {
+    const c = cycleProgress({ today: '2026-11-13', card: CONECTA, newSpend: 1_800_000, carried: 0 });
+    expect([c.start, c.close, c.dueDate]).toEqual(['2026-11-04', '2026-12-03', '2026-12-24']);
+    expect([c.daysElapsed, c.daysTotal, c.daysLeft]).toEqual([10, 30, 20]);
+    expect(c.accumulated).toBe(1_800_000);
+    // 18,000 en 10 días -> 54,000 al corte si sigue el ritmo
+    expect(c.projectedAtClose).toBe(5_400_000);
+    expect(c.budget).toBeNull();
+  });
+  it('las cuotas fijas no se extrapolan', () => {
+    const c = cycleProgress({ today: '2026-11-13', card: CONECTA, newSpend: 100_000, carried: 50_000 });
+    expect(c.accumulated).toBe(150_000);
+    expect(c.projectedAtClose).toBe(50_000 + 300_000);
+  });
+  it('presupuesto: restante y gasto diario permitido', () => {
+    const c = cycleProgress({ today: '2026-11-13', card: CONECTA, newSpend: 1_800_000, carried: 0, budget: 3_000_000 });
+    expect(c.budgetLeft).toBe(1_200_000);
+    // 12,000 entre los 21 días que quedan (hoy incluido)
+    expect(c.dailyAllowance).toBe(Math.floor(1_200_000 / 21));
+    const over = cycleProgress({ today: '2026-11-13', card: CONECTA, newSpend: 3_500_000, carried: 0, budget: 3_000_000 });
+    expect([over.budgetLeft, over.dailyAllowance]).toEqual([-500_000, 0]);
+  });
+  it('el día de corte cuenta en el ciclo que cierra', () => {
+    const c = cycleProgress({ today: '2026-12-03', card: CONECTA, newSpend: 0, carried: 0 });
+    expect([c.close, c.daysLeft]).toEqual(['2026-12-03', 0]);
+    const n = cycleProgress({ today: '2026-12-04', card: CONECTA, newSpend: 0, carried: 0 });
+    expect([n.start, n.close, n.daysElapsed]).toEqual(['2026-12-04', '2027-01-03', 1]);
   });
 });

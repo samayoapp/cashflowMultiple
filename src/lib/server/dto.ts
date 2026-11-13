@@ -37,6 +37,8 @@ export function accountDto(a: Account, balance: number, balanceForeign = 0) {
     balanceForeign,
     creditLimitForeign: a.creditLimitForeign ? cents(a.creditLimitForeign) : null,
     customSellRate: a.customSellRate ? Number(a.customSellRate.toString()).toFixed(4) : null,
+    /** Tope de gasto por ciclo de facturación (moneda de la entidad). */
+    cycleBudget: a.cycleBudget ? cents(a.cycleBudget) : null,
   };
 }
 export type AccountDto = ReturnType<typeof accountDto>;

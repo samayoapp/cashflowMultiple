@@ -466,6 +466,7 @@ interface StatementItem {
   purchaseDate: string;
   chargeAmount: number;
   isOpening: boolean;
+  openingKind: 'STATEMENT' | 'UNBILLED' | null;
   fromObligation: boolean;
   number: number;
   count: number;
@@ -568,7 +569,7 @@ function CardsTab() {
                   label={`Total consolidado a pagar (${cur})`}
                   value={c.totalToPayBase === null ? '—' : formatMoney(c.totalToPayBase, cur)}
                   tone="red"
-                  sub={`Ciclo actual: ${both(c.currentCycle)}`}
+                  sub={c.nextPayment ? `Incluye el ciclo en curso y cuotas futuras` : undefined}
                 />
                 <Stat
                   label="Próxima fecha de pago"
@@ -593,19 +594,18 @@ function CardsTab() {
                 />
               </div>
             ) : (
-              <div className="grid grid-cols-2 gap-4 p-4 lg:grid-cols-4">
-                <Stat label={`Consumo del ciclo${c.currentStatementDate ? ` (corte ${formatShortDate(c.currentStatementDate)})` : ''}`} value={formatMoney(c.currentCycle.base, cur)} />
+              <div className="grid grid-cols-2 gap-4 p-4 lg:grid-cols-3">
+                <Stat
+                  label={c.nextPayment ? `A pagar el ${formatShortDate(c.nextPayment.dueDate)}` : 'Próximo pago'}
+                  value={c.nextPayment ? formatMoney(c.nextPayment.pending, cur) : '—'}
+                  sub={c.nextPayment ? (c.nextPayment.dueDate < app.today ? 'Vencido' : 'Estado de cuenta ya cortado') : 'Sin pagos pendientes'}
+                  tone="red"
+                />
                 <Stat
                   label="Saldo total adeudado"
                   value={formatMoney(c.debt, cur)}
                   tone="red"
-                  sub={c.pendingInstallments.base !== c.debt ? `Cuotas por pagar: ${formatMoney(c.pendingInstallments.base, cur)}` : 'Incluye cuotas futuras'}
-                />
-                <Stat
-                  label="Próxima fecha de pago"
-                  value={c.nextPayment ? formatShortDate(c.nextPayment.dueDate) : '—'}
-                  sub={c.nextPayment ? formatMoney(c.nextPayment.pending, cur) : 'Sin pagos pendientes'}
-                  tone={c.nextPayment && c.nextPayment.dueDate < app.today ? 'red' : undefined}
+                  sub={c.pendingInstallments.base !== c.debt ? `Cuotas por pagar: ${formatMoney(c.pendingInstallments.base, cur)}` : 'Incluye el ciclo en curso y cuotas futuras'}
                 />
                 <Stat
                   label="Disponible"
@@ -615,6 +615,7 @@ function CardsTab() {
                 />
               </div>
             )}
+            {c.cycle && <CycleBar cycle={c.cycle} cur={cur} detail={fc && c.currentCycle.foreign ? both(c.currentCycle) : null} />}
             {statements.length > 0 && (
               <div className="overflow-x-auto border-t border-slate-200 dark:border-slate-800">
                 <table className="w-full">
@@ -665,7 +666,8 @@ function CardsTab() {
                                   <div className="flex flex-wrap items-center gap-1.5">
                                     <span>{i.description}</span>
                                     {i.count > 1 && <Badge tone="blue">Cuota {i.number}/{i.count}</Badge>}
-                                    {i.isOpening && <Badge>Deuda inicial</Badge>}
+                                    {i.openingKind === 'STATEMENT' && <Badge>Saldo inicial al corte</Badge>}
+                                    {i.openingKind === 'UNBILLED' && <Badge>Consumos iniciales desde el corte</Badge>}
                                     {i.fromObligation && <Badge>Desde CxP</Badge>}
                                   </div>
                                   <div className="text-xs text-slate-500">
@@ -705,6 +707,59 @@ function CardsTab() {
       })}
       <CardChargeModal open={Boolean(charge)} onClose={() => setCharge(null)} entityId={charge?.entityId} cardId={charge?.cardId} />
       <CardPaymentModal open={Boolean(pay)} onClose={() => setPay(null)} target={pay} />
+    </div>
+  );
+}
+
+/** Ciclo de facturación en curso: lo acumulado para el próximo corte, ritmo de gasto y presupuesto. */
+function CycleBar({ cycle, cur, detail }: { cycle: NonNullable<CardSummaryDto['cycle']>; cur: string; detail: string | null }) {
+  const pct = cycle.budget ? Math.round((cycle.accumulated / cycle.budget) * 100) : null;
+  const projPct = cycle.budget ? Math.round((cycle.projectedAtClose / cycle.budget) * 100) : null;
+  const over = cycle.budgetLeft !== null && cycle.budgetLeft < 0;
+  const willExceed = !over && projPct !== null && projPct > 100;
+  return (
+    <div className="border-t border-slate-200 bg-slate-50/60 px-4 py-3 dark:border-slate-800 dark:bg-slate-800/20">
+      <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+        <p className="text-sm font-medium">
+          <CalendarClock className="mr-1 inline h-4 w-4 text-slate-400" />
+          Ciclo en curso: {formatShortDate(cycle.start)} → corte {formatShortDate(cycle.close)}
+          <span className="ml-2 text-xs font-normal text-slate-500">
+            {cycle.daysLeft === 0 ? 'corta hoy' : `faltan ${cycle.daysLeft} día${cycle.daysLeft === 1 ? '' : 's'}`} · día {cycle.daysElapsed} de{' '}
+            {cycle.daysTotal}
+          </span>
+        </p>
+        <p className="text-xs text-slate-500">
+          Se paga el <strong>{formatShortDate(cycle.dueDate)}</strong>
+        </p>
+      </div>
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-3">
+        <Stat
+          label="Acumulado para el próximo corte"
+          value={formatMoney(cycle.accumulated, cur)}
+          sub={detail ? `${detail} (convertido a la tasa vigente)` : 'Compras del ciclo + cuotas que caen en este corte'}
+          bar={pct === null ? undefined : Math.min(pct, 100)}
+        />
+        <Stat
+          label="Al ritmo actual cerrarías en"
+          value={formatMoney(cycle.projectedAtClose, cur)}
+          sub={cycle.daysElapsed < 5 ? 'Estimado poco confiable: el ciclo apenas empieza' : 'Si sigues gastando igual hasta el corte'}
+          tone={willExceed || over ? 'red' : undefined}
+        />
+        {cycle.budget !== null ? (
+          <Stat
+            label={`Presupuesto del ciclo (${formatMoney(cycle.budget, cur)})`}
+            value={over ? `Excedido ${formatMoney(-cycle.budgetLeft!, cur)}` : `Quedan ${formatMoney(cycle.budgetLeft!, cur)}`}
+            sub={
+              over
+                ? 'Ya pasaste el tope de este ciclo'
+                : `${formatMoney(cycle.dailyAllowance!, cur)} por día hasta el corte${willExceed ? ' · a este ritmo te pasarás' : ''}`
+            }
+            tone={over || willExceed ? 'red' : undefined}
+          />
+        ) : (
+          <Stat label="Presupuesto del ciclo" value="Sin definir" sub="Defínelo en Configuración → Cuentas → Editar" />
+        )}
+      </div>
     </div>
   );
 }

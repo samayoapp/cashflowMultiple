@@ -12,6 +12,7 @@ import {
   nextDayOnOrAfter,
   statementCloseFor,
   statementForDueDate,
+  cycleProgress,
   type CardCycleConfig,
 } from '@/lib/projection/card-cycle';
 import { convertPair, fxDifference, rate4, rateToString, type Rate4 } from '@/lib/projection/fx';
@@ -21,6 +22,15 @@ import type { Cents } from '@/lib/money';
 type Tx = Prisma.TransactionClient;
 
 export const MAX_INSTALLMENTS = 36;
+
+/**
+ * Tipos de deuda inicial de una tarjeta:
+ *  - STATEMENT: saldo del último estado de cuenta, se paga en la próxima fecha de pago.
+ *  - UNBILLED: consumos hechos después del último corte; se facturan en el próximo corte.
+ */
+export type OpeningKind = 'STATEMENT' | 'UNBILLED';
+export const openingKindOf = (c: { isOpening: boolean; openingKind: string | null }): OpeningKind | null =>
+  c.isOpening ? (c.openingKind === 'UNBILLED' ? 'UNBILLED' : 'STATEMENT') : null;
 
 /** Valida que la cuenta sea una tarjeta utilizable y devuelve su ciclo. */
 export function cardCycleOf(card: Account): CardCycleConfig {
@@ -88,6 +98,7 @@ export async function insertCardCharge(
     obligationId?: string | null;
     movementId: string;
     isOpening?: boolean;
+    openingKind?: OpeningKind | null;
     /** Solo deuda inicial: fecha de pago fija (no se calcula por corte). */
     fixedDueDate?: ISODate;
     userId: string;
@@ -126,6 +137,7 @@ export async function insertCardCharge(
       obligationId: args.obligationId ?? null,
       movementId: args.movementId,
       isOpening: Boolean(args.isOpening),
+      openingKind: args.isOpening ? (args.openingKind ?? 'STATEMENT') : null,
       createdById: args.userId,
     },
   });
@@ -145,17 +157,22 @@ export async function insertCardCharge(
   return { charge, schedule };
 }
 
-/** Deuda inicial al crear la tarjeta (en lempiras o en la moneda extranjera): se proyecta en el próximo pago. */
+/**
+ * Deuda inicial al crear la tarjeta (en lempiras o en la moneda extranjera).
+ * STATEMENT se proyecta en la próxima fecha de pago; UNBILLED, en el pago del corte en curso.
+ */
 export async function createOpeningDebt(
   tx: Tx,
   card: Account,
   debt: Cents,
   today: ISODate,
   userId: string,
-  opts: { currency?: string | null; rateAtTx?: Rate4 | null } = {},
+  opts: { currency?: string | null; rateAtTx?: Rate4 | null; kind?: OpeningKind } = {},
 ) {
   const cycle = cardCycleOf(card);
   const currency = opts.currency ?? null;
+  const unbilled = opts.kind === 'UNBILLED';
+  const suffix = currency ? ` (${currency})` : '';
   const mv = await tx.cashMovement.create({
     data: {
       entityId: card.entityId,
@@ -164,7 +181,7 @@ export async function createOpeningDebt(
       amount: dec(-debt),
       currency,
       date: dbDate(today),
-      description: `Deuda inicial de la tarjeta${currency ? ` (${currency})` : ''}`,
+      description: unbilled ? `Consumos desde el último corte${suffix}` : `Deuda inicial de la tarjeta${suffix}`,
       createdById: userId,
     },
   });
@@ -172,7 +189,7 @@ export async function createOpeningDebt(
   await insertCardCharge(tx, {
     card,
     purchaseDate: today,
-    description: currency ? `Saldo inicial ${currency}` : 'Saldo inicial',
+    description: unbilled ? `Consumos desde el corte${suffix}` : `Saldo al corte${suffix}`,
     amount: debt,
     installments: 1,
     currency,
@@ -180,7 +197,8 @@ export async function createOpeningDebt(
     amountBase: currency && opts.rateAtTx ? convertPair(debt, currency, base, opts.rateAtTx) : debt,
     movementId: mv.id,
     isOpening: true,
-    fixedDueDate: nextDayOnOrAfter(today, cycle.paymentDueDay),
+    openingKind: unbilled ? 'UNBILLED' : 'STATEMENT',
+    fixedDueDate: unbilled ? undefined : nextDayOnOrAfter(today, cycle.paymentDueDay),
     userId,
   });
 }
@@ -498,6 +516,7 @@ export async function getCardsSummary(entityIds: string[], today: ISODate) {
             purchaseDate: true,
             amount: true,
             isOpening: true,
+            openingKind: true,
             obligationId: true,
             exchangeRateAtTx: true,
             category: { select: { name: true } },
@@ -532,6 +551,8 @@ export async function getCardsSummary(entityIds: string[], today: ISODate) {
     const groups = new Map<string, { dueDate: ISODate; statementDate: ISODate; total: Money2; pending: Money2; items: unknown[] }>();
     const pendingTotal: Money2 = { base: 0, foreign: 0 };
     const currentCycle: Money2 = { base: 0, foreign: 0 };
+    const cycleNew: Money2 = { base: 0, foreign: 0 };
+    const cycleCarried: Money2 = { base: 0, foreign: 0 };
     for (const i of mine) {
       const isForeign = Boolean(i.currency && i.currency !== base);
       const k: keyof Money2 = isForeign ? 'foreign' : 'base';
@@ -540,7 +561,11 @@ export async function getCardsSummary(entityIds: string[], today: ISODate) {
       const dueDate = isoOf(i.dueDate);
       const statementDate = isoOf(i.statementDate);
       pendingTotal[k] += pending;
-      if (currentClose && statementDate === currentClose && !i.charge.isOpening) currentCycle[k] += amount;
+      // Ciclo en curso: todo lo que se factura en el próximo corte (menos el saldo al corte anterior)
+      if (currentClose && statementDate === currentClose && openingKindOf(i.charge) !== 'STATEMENT') {
+        currentCycle[k] += amount;
+        (i.number === 1 ? cycleNew : cycleCarried)[k] += amount;
+      }
       const g = groups.get(dueDate) ?? { dueDate, statementDate, total: { base: 0, foreign: 0 }, pending: { base: 0, foreign: 0 }, items: [] };
       g.total[k] += amount;
       g.pending[k] += pending;
@@ -555,6 +580,7 @@ export async function getCardsSummary(entityIds: string[], today: ISODate) {
         currency: isForeign ? i.currency : base,
         rateAtTx: i.charge.exchangeRateAtTx ? rateToString(rate4(i.charge.exchangeRateAtTx)) : null,
         isOpening: i.charge.isOpening,
+        openingKind: openingKindOf(i.charge),
         fromObligation: Boolean(i.charge.obligationId),
         number: i.number,
         count: i.count,
@@ -573,6 +599,17 @@ export async function getCardsSummary(entityIds: string[], today: ISODate) {
         status: pendingAll === 0 ? 'PAID' : g.dueDate < today ? 'OVERDUE' : pendingAll < totalAll ? 'PARTIAL' : 'OPEN',
       };
     });
+    const inBase = (m: Money2): Cents => m.base + (toBase(m.foreign) ?? 0);
+    const cycle =
+      card.statementDay && card.paymentDueDay
+        ? cycleProgress({
+            today,
+            card: { statementDay: card.statementDay, paymentDueDay: card.paymentDueDay },
+            newSpend: inBase(cycleNew),
+            carried: inBase(cycleCarried),
+            budget: card.cycleBudget ? cents(card.cycleBudget) : null,
+          })
+        : null;
     const next = statements.find((s) => s.pending.base + s.pending.foreign > 0) ?? null;
     const limit = card.creditLimit ? cents(card.creditLimit) : null;
     const limitForeign = card.creditLimitForeign ? cents(card.creditLimitForeign) : null;
@@ -607,6 +644,9 @@ export async function getCardsSummary(entityIds: string[], today: ISODate) {
       pendingInstallments: pendingTotal,
       currentCycle,
       currentStatementDate: currentClose,
+      /** Ciclo en curso en la moneda de la entidad (el sub-saldo extranjero convertido a la tasa vigente). */
+      cycle,
+      cycleBudget: card.cycleBudget ? cents(card.cycleBudget) : null,
       nextPayment: next
         ? { dueDate: next.dueDate, pending: next.pending.base, pendingForeign: next.pending.foreign, totalBase: next.pendingTotalBase }
         : null,

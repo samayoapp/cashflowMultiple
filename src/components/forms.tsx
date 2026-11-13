@@ -1,10 +1,11 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import type { AccountDto, EntityDto } from '@/lib/server/dto';
 import { api, emitDataChanged, useApi } from '@/lib/client/api';
 import { centsToDecimalString, formatMoney, toCents, type Cents } from '@/lib/money';
-import { addDays } from '@/lib/dates';
+import { addDays, formatShortDate } from '@/lib/dates';
+import { dueDateFor, nextDayOnOrAfter, statementCloseFor } from '@/lib/projection/card-cycle';
 import { useApp } from './AppContext';
 import { Button, ErrorBox, Field, Modal, Toggle, useToast } from './ui';
 import { CardImpactPreview, INSTALLMENT_OPTIONS, isCard, liquidAccounts } from './cards';
@@ -156,6 +157,7 @@ export function EntityFormModal({
 /** Saldo / deuda inicial por moneda (GET /api/accounts/:id). */
 interface OpeningSlot {
   currency: string | null;
+  kind: 'STATEMENT' | 'UNBILLED' | null;
   amount: Cents;
   date: string | null;
   locked: boolean;
@@ -187,6 +189,9 @@ export function AccountFormModal({ open, onClose, account }: { open: boolean; on
   const [dual, setDual] = useState(false);
   const [limitForeign, setLimitForeign] = useState('');
   const [openingForeign, setOpeningForeign] = useState('0');
+  const [unbilled, setUnbilled] = useState('0');
+  const [unbilledForeign, setUnbilledForeign] = useState('0');
+  const [budget, setBudget] = useState('');
   const [customRate, setCustomRate] = useState('');
   const [reschedule, setReschedule] = useState(true);
   const isCardType = type === 'CREDIT_CARD';
@@ -196,8 +201,13 @@ export function AccountFormModal({ open, onClose, account }: { open: boolean; on
   const payable = useMemo(() => liquidAccounts(entityAccounts.data), [entityAccounts.data]);
   const detail = useApi<AccountDto & { opening: OpeningSlot[] }>(open && account ? `/api/accounts/${account.id}` : null);
   const slots = detail.data?.id === account?.id ? detail.data?.opening : undefined;
-  const baseSlot = slots?.find((x) => x.currency === null);
-  const foreignSlot = slots?.find((x) => x.currency !== null);
+  const slotOf = (foreign: boolean, kind: 'STATEMENT' | 'UNBILLED' | null) =>
+    slots?.find((x) => (x.currency !== null) === foreign && x.kind === kind);
+  const baseSlot = slotOf(false, isCardType ? 'STATEMENT' : null);
+  const foreignSlot = slotOf(true, 'STATEMENT');
+  const unbilledSlot = slotOf(false, 'UNBILLED');
+  const unbilledForeignSlot = slotOf(true, 'UNBILLED');
+  const firstDate = slots?.find((x) => x.date)?.date ?? null;
   const anyLocked = Boolean(slots?.some((x) => x.locked));
   const cycleChanged =
     editing && isCardType && (Number(statementDay) !== account?.statementDay || Number(paymentDueDay) !== account?.paymentDueDay);
@@ -218,6 +228,9 @@ export function AccountFormModal({ open, onClose, account }: { open: boolean; on
     setDual(Boolean(account?.foreignCurrency));
     setLimitForeign(account?.creditLimitForeign != null ? centsInput(account.creditLimitForeign) : '');
     setOpeningForeign('0');
+    setUnbilled('0');
+    setUnbilledForeign('0');
+    setBudget(account?.cycleBudget != null ? centsInput(account.cycleBudget) : '');
     setCustomRate(account?.customSellRate ?? '');
     setReschedule(true);
   }, [open, account, defaultEntity, app.today, setError]);
@@ -227,7 +240,9 @@ export function AccountFormModal({ open, onClose, account }: { open: boolean; on
     if (!open || !slots) return;
     setOpening(centsInput(baseSlot?.amount ?? 0));
     setOpeningForeign(centsInput(foreignSlot?.amount ?? 0));
-    setDate(baseSlot?.date ?? foreignSlot?.date ?? app.today);
+    setUnbilled(centsInput(unbilledSlot?.amount ?? 0));
+    setUnbilledForeign(centsInput(unbilledForeignSlot?.amount ?? 0));
+    setDate(firstDate ?? app.today);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, slots]);
 
@@ -246,7 +261,15 @@ export function AccountFormModal({ open, onClose, account }: { open: boolean; on
     const openF = isDual ? parseMoneyInput(openingForeign || '0') : '0';
     if (openF === null || Number(openF) < 0) return setError(`Deuda en ${foreignCurrency} inválida`);
     if (isDual && customRate.trim() && !/^\d+(\.\d{1,4})?$/.test(customRate.trim())) return setError('Tasa propia inválida (hasta 4 decimales)');
-    const cardBody = isCardType ? { creditLimit: limit, statementDay: sd, paymentDueDay: pd, defaultPaymentAccountId: payFrom || null } : {};
+    const unb = isCardType ? parseMoneyInput(unbilled || '0') : '0';
+    if (unb === null || Number(unb) < 0) return setError('Consumos desde el corte inválidos');
+    const unbF = isDual ? parseMoneyInput(unbilledForeign || '0') : '0';
+    if (unbF === null || Number(unbF) < 0) return setError(`Consumos desde el corte en ${foreignCurrency} inválidos`);
+    const bud = isCardType && budget.trim() ? parseMoneyInput(budget) : null;
+    if (isCardType && budget.trim() && (bud === null || Number(bud) < 0)) return setError('Presupuesto inválido');
+    const cardBody = isCardType
+      ? { creditLimit: limit, statementDay: sd, paymentDueDay: pd, defaultPaymentAccountId: payFrom || null, cycleBudget: bud }
+      : {};
 
     if (account) {
       if (!slots) return setError('Cargando el saldo inicial, intenta de nuevo');
@@ -260,7 +283,9 @@ export function AccountFormModal({ open, onClose, account }: { open: boolean; on
       }
       if (toCents(amount) !== (baseSlot?.amount ?? 0)) body.openingBalance = amount;
       if (isDual && toCents(openF) !== (foreignSlot?.amount ?? 0)) body.openingDebtForeign = openF;
-      if (date !== (baseSlot?.date ?? foreignSlot?.date ?? app.today)) body.openingDate = date;
+      if (isCardType && toCents(unb) !== (unbilledSlot?.amount ?? 0)) body.openingUnbilled = unb;
+      if (isDual && toCents(unbF) !== (unbilledForeignSlot?.amount ?? 0)) body.openingUnbilledForeign = unbF;
+      if (date !== (firstDate ?? app.today)) body.openingDate = date;
       const ok = await run(async () => {
         const r = await api<{ rescheduled: number }>(`/api/accounts/${account.id}`, { method: 'PATCH', body });
         toast(`${isCardType ? 'Tarjeta' : 'Cuenta'} actualizada${r.rescheduled ? ` · ${r.rescheduled} cuota(s) re-programada(s)` : ''}`);
@@ -277,8 +302,15 @@ export function AccountFormModal({ open, onClose, account }: { open: boolean; on
       openingBalance: amount,
       openingDate: date,
       ...cardBody,
+      ...(isCardType ? { openingUnbilled: unb } : {}),
       ...(isDual
-        ? { dualCurrency: true, creditLimitForeign: limF, openingDebtForeign: openF, customSellRate: customRate.trim() || null }
+        ? {
+            dualCurrency: true,
+            creditLimitForeign: limF,
+            openingDebtForeign: openF,
+            openingUnbilledForeign: unbF,
+            customSellRate: customRate.trim() || null,
+          }
         : {}),
     };
     const ok = await run(() => api('/api/accounts', { body }), isCardType ? 'Tarjeta creada' : 'Cuenta creada');
@@ -286,7 +318,14 @@ export function AccountFormModal({ open, onClose, account }: { open: boolean; on
   }
 
   const lockedHint = 'Ya tiene pagos aplicados: corrígela con "Conciliar"';
-  const openingLabel = isCardType ? (editing ? 'Deuda inicial' : 'Deuda actual') : editing ? 'Saldo inicial' : 'Saldo actual';
+  const openingLabel = editing ? 'Saldo inicial' : 'Saldo actual';
+  const cycleHint = (() => {
+    const sd = Number(statementDay);
+    const pd = Number(paymentDueDay);
+    if (!isCardType || !(sd >= 1 && sd <= 31) || !(pd >= 1 && pd <= 31) || !date) return null;
+    const close = statementCloseFor(date, sd);
+    return { nextPay: nextDayOnOrAfter(date, pd), close, due: dueDateFor(close, pd) };
+  })();
 
   return (
     <Modal open={open} onClose={onClose} title={editing ? `Editar ${isCardType ? 'tarjeta' : 'cuenta'}: ${account?.name ?? ''}` : 'Nueva cuenta / caja'}>
@@ -350,60 +389,115 @@ export function AccountFormModal({ open, onClose, account }: { open: boolean; on
               />
             )}
             {dual && foreignCurrency && (
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-2 gap-3">
                 <Field label={`Límite ${foreignCurrency} (opcional)`}>
                   <input className="input text-right" inputMode="decimal" value={limitForeign} onChange={(e) => setLimitForeign(e.target.value)} />
-                </Field>
-                <Field
-                  label={`${editing ? 'Deuda inicial' : 'Deuda actual'} ${foreignCurrency}`}
-                  hint={foreignSlot?.locked ? lockedHint : undefined}
-                >
-                  <input
-                    className="input text-right"
-                    inputMode="decimal"
-                    value={openingForeign}
-                    onChange={(e) => setOpeningForeign(e.target.value)}
-                    disabled={foreignSlot?.locked}
-                  />
                 </Field>
                 <Field label="Tasa propia (opcional)" hint={`Global: ${app.fx?.effectiveSellRate ?? '—'}`}>
                   <input className="input text-right" inputMode="decimal" value={customRate} onChange={(e) => setCustomRate(e.target.value)} placeholder={app.fx?.effectiveSellRate} />
                 </Field>
               </div>
             )}
-            <Field label="Cuenta de pago por defecto (opcional)">
-              <select className="input" value={payFrom} onChange={(e) => setPayFrom(e.target.value)}>
-                <option value="">Ninguna</option>
-                {payable.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.name}
-                  </option>
-                ))}
-              </select>
-            </Field>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Cuenta de pago por defecto (opcional)">
+                <select className="input" value={payFrom} onChange={(e) => setPayFrom(e.target.value)}>
+                  <option value="">Ninguna</option>
+                  {payable.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field
+                label={`Presupuesto por ciclo ${entityCurrency} (opcional)`}
+                hint="Tope de gasto entre un corte y otro; te avisa si vas a pasarte"
+              >
+                <input className="input text-right" inputMode="decimal" value={budget} onChange={(e) => setBudget(e.target.value)} />
+              </Field>
+            </div>
             <p className="text-xs text-slate-500">
               Las compras hasta el día de corte se pagan en la siguiente fecha límite; las posteriores, en la del ciclo subsiguiente.
               La tarjeta no suma a la Caja real hoy.
             </p>
           </div>
         )}
-        <div className="grid grid-cols-2 gap-3">
-          <Field
-            label={`${openingLabel} (${entityCurrency})`}
-            hint={baseSlot?.locked ? lockedHint : isCardType ? 'Se proyecta en la próxima fecha de pago' : undefined}
-          >
-            <input
-              className="input text-right"
-              inputMode="decimal"
-              value={opening}
-              onChange={(e) => setOpening(e.target.value)}
-              disabled={baseSlot?.locked || (editing && !slots)}
-            />
-          </Field>
-          <Field label="Fecha del saldo">
-            <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} required disabled={anyLocked} />
-          </Field>
-        </div>
+        {isCardType ? (
+          <div className="space-y-2 rounded-lg border border-slate-200 p-3 dark:border-slate-700">
+            <div className="flex flex-wrap items-end justify-between gap-2">
+              <div>
+                <p className="text-sm font-medium">{editing ? 'Deuda inicial de la tarjeta' : 'Deuda actual de la tarjeta'}</p>
+                <p className="text-xs text-slate-500">Sepárala como aparece en la app del banco: lo ya cortado y lo consumido después.</p>
+              </div>
+              <Field label="A la fecha">
+                <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} required disabled={anyLocked} />
+              </Field>
+            </div>
+            <div className="grid grid-cols-[3rem_1fr_1fr] items-center gap-2 text-xs text-slate-500">
+              <span />
+              <span>Saldo al último corte</span>
+              <span>Consumos desde el corte</span>
+              {[
+                { cur: entityCurrency, a: opening, setA: setOpening, sa: baseSlot, b: unbilled, setB: setUnbilled, sb: unbilledSlot },
+                ...(dual && foreignCurrency
+                  ? [
+                      {
+                        cur: foreignCurrency,
+                        a: openingForeign,
+                        setA: setOpeningForeign,
+                        sa: foreignSlot,
+                        b: unbilledForeign,
+                        setB: setUnbilledForeign,
+                        sb: unbilledForeignSlot,
+                      },
+                    ]
+                  : []),
+              ].map((r) => (
+                <Fragment key={r.cur}>
+                  <span className="font-medium text-slate-700 dark:text-slate-300">{r.cur}</span>
+                  <input
+                    className="input text-right"
+                    inputMode="decimal"
+                    value={r.a}
+                    onChange={(e) => r.setA(e.target.value)}
+                    disabled={r.sa?.locked || (editing && !slots)}
+                    title={r.sa?.locked ? lockedHint : undefined}
+                  />
+                  <input
+                    className="input text-right"
+                    inputMode="decimal"
+                    value={r.b}
+                    onChange={(e) => r.setB(e.target.value)}
+                    disabled={r.sb?.locked || (editing && !slots)}
+                    title={r.sb?.locked ? lockedHint : undefined}
+                  />
+                </Fragment>
+              ))}
+            </div>
+            {cycleHint && (
+              <p className="text-xs text-slate-500">
+                Saldo al corte: se proyecta para el <strong>{formatShortDate(cycleHint.nextPay)}</strong>. Consumos desde el corte: se
+                facturan el {formatShortDate(cycleHint.close)} y se proyectan para el <strong>{formatShortDate(cycleHint.due)}</strong>.
+              </p>
+            )}
+            {anyLocked && <p className="text-xs text-amber-600">Los montos bloqueados ya tienen pagos aplicados: corrígelos con &quot;Conciliar&quot;.</p>}
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 gap-3">
+            <Field label={`${openingLabel} (${entityCurrency})`}>
+              <input
+                className="input text-right"
+                inputMode="decimal"
+                value={opening}
+                onChange={(e) => setOpening(e.target.value)}
+                disabled={editing && !slots}
+              />
+            </Field>
+            <Field label="Fecha del saldo">
+              <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
+            </Field>
+          </div>
+        )}
         {editing && (
           <p className="text-xs text-slate-500">
             Corregir el {isCardType ? 'saldo o la deuda inicial' : 'saldo inicial'} cambia la Caja real y toda la proyección en la misma

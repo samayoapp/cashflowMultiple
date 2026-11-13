@@ -173,6 +173,7 @@ model Account {
   foreignCurrency         String?
   creditLimitForeign      Decimal?          @db.Decimal(18, 2)
   customSellRate          Decimal?          @db.Decimal(10, 4)
+  cycleBudget             Decimal?          @db.Decimal(18, 2)
   createdAt               DateTime          @default(now())
   updatedAt               DateTime          @updatedAt
   entity                  Entity            @relation(fields: [entityId], references: [id], onDelete: Restrict)
@@ -405,6 +406,7 @@ model CardCharge {
   obligationId     String?           @unique
   movementId       String            @unique
   isOpening        Boolean           @default(false)
+  openingKind      String? // NULL/STATEMENT = saldo al corte; UNBILLED = consumos después del corte
   currency         String? // NULL = moneda de la entidad
   exchangeRateAtTx Decimal?          @db.Decimal(10, 4)
   amountBase       Decimal?          @db.Decimal(18, 2)

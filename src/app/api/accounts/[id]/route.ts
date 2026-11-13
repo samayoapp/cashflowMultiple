@@ -7,6 +7,7 @@ import { accountDto } from '@/lib/server/dto';
 import { cents, dec, isoOf } from '@/lib/server/serialize';
 import { accountType, assertPaymentAccount, cardFields, resolveForeignCurrency } from '@/lib/server/account-validation';
 import { isoDate, money, optionalText, shortText } from '@/lib/validation';
+import type { OpeningKind } from '@/lib/server/cards';
 import { getOpeningSlots, rescheduleCardInstallments, setOpening } from '@/lib/server/account-opening';
 import { getSettings } from '@/lib/server/projection-data';
 import { todayInTz } from '@/lib/dates';
@@ -113,22 +114,32 @@ export const PATCH = route<{ params: { id: string } }>(async (req, { params }) =
               creditLimitForeign:
                 data.creditLimitForeign === undefined ? undefined : data.creditLimitForeign === null ? null : dec(data.creditLimitForeign),
               customSellRate: data.customSellRate,
+              cycleBudget: data.cycleBudget === undefined ? undefined : data.cycleBudget === null ? null : dec(data.cycleBudget),
             }
           : {}),
       },
     });
     // Saldo / deuda inicial: solo se toca lo que cambió (una deuda con pagos queda bloqueada)
     const slots = await getOpeningSlots(tx, updated);
-    const wanted: { currency: string | null; amount: number | undefined }[] = [
-      { currency: null, amount: data.openingBalance },
-      ...(isCard && updated.foreignCurrency ? [{ currency: updated.foreignCurrency, amount: data.openingDebtForeign }] : []),
-    ];
+    const fc = isCard ? updated.foreignCurrency : null;
+    const wanted: { currency: string | null; kind: OpeningKind | null; amount: number | undefined }[] = isCard
+      ? [
+          { currency: null, kind: 'STATEMENT', amount: data.openingBalance },
+          { currency: null, kind: 'UNBILLED', amount: data.openingUnbilled },
+          ...(fc
+            ? [
+                { currency: fc, kind: 'STATEMENT' as const, amount: data.openingDebtForeign },
+                { currency: fc, kind: 'UNBILLED' as const, amount: data.openingUnbilledForeign },
+              ]
+            : []),
+        ]
+      : [{ currency: null, kind: null, amount: data.openingBalance }];
     for (const w of wanted) {
-      const slot = slots.find((x) => x.currency === w.currency);
+      const slot = slots.find((x) => x.currency === w.currency && x.kind === w.kind);
       const amount = w.amount ?? slot?.amount ?? 0;
       const date = data.openingDate ?? slot?.date ?? today;
       if (slot && amount === slot.amount && (slot.date === date || (amount === 0 && !slot.date))) continue;
-      await setOpening(tx, updated, { currency: w.currency, amount, date, userId: user.id });
+      await setOpening(tx, updated, { currency: w.currency, kind: w.kind, amount, date, userId: user.id });
     }
     const cycleChanged = isCard && (updated.statementDay !== a.statementDay || updated.paymentDueDay !== a.paymentDueDay);
     const rescheduled = cycleChanged && data.rescheduleInstallments ? await rescheduleCardInstallments(tx, updated) : 0;

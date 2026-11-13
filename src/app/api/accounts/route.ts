@@ -63,7 +63,7 @@ export const POST = route(async (req) => {
   const fxRate = foreignCurrency
     ? (data.customSellRate ? rate4(data.customSellRate) : (await getCurrentFx())?.effective4 ?? null)
     : null;
-  if (foreignCurrency && (data.openingDebtForeign ?? 0) > 0 && !fxRate) {
+  if (foreignCurrency && ((data.openingDebtForeign ?? 0) > 0 || (data.openingUnbilledForeign ?? 0) > 0) && !fxRate) {
     throw badRequest('No hay tipo de cambio registrado para valuar la deuda inicial en moneda extranjera');
   }
 
@@ -83,14 +83,24 @@ export const POST = route(async (req) => {
               foreignCurrency,
               creditLimitForeign: foreignCurrency && data.creditLimitForeign != null ? dec(data.creditLimitForeign) : null,
               customSellRate: foreignCurrency && data.customSellRate ? data.customSellRate : null,
+              cycleBudget: data.cycleBudget == null ? null : dec(data.cycleBudget),
             }
           : {}),
       },
     });
     if (isCard) {
+      // Saldo al último corte (próximo pago) y consumos posteriores al corte (pago del corte en curso)
       if (data.openingBalance > 0) await createOpeningDebt(tx, a, data.openingBalance, date, user.id);
+      if ((data.openingUnbilled ?? 0) > 0) await createOpeningDebt(tx, a, data.openingUnbilled!, date, user.id, { kind: 'UNBILLED' });
       if (foreignCurrency && (data.openingDebtForeign ?? 0) > 0) {
         await createOpeningDebt(tx, a, data.openingDebtForeign!, date, user.id, { currency: foreignCurrency, rateAtTx: fxRate });
+      }
+      if (foreignCurrency && (data.openingUnbilledForeign ?? 0) > 0) {
+        await createOpeningDebt(tx, a, data.openingUnbilledForeign!, date, user.id, {
+          currency: foreignCurrency,
+          rateAtTx: fxRate,
+          kind: 'UNBILLED',
+        });
       }
     } else if (data.openingBalance !== 0) {
       await tx.cashMovement.create({
@@ -108,7 +118,11 @@ export const POST = route(async (req) => {
     return a;
   });
   return ok(
-    accountDto(account, isCard ? -data.openingBalance : data.openingBalance, foreignCurrency ? -(data.openingDebtForeign ?? 0) : 0),
+    accountDto(
+      account,
+      isCard ? -(data.openingBalance + (data.openingUnbilled ?? 0)) : data.openingBalance,
+      foreignCurrency ? -((data.openingDebtForeign ?? 0) + (data.openingUnbilledForeign ?? 0)) : 0,
+    ),
     { status: 201 },
   );
 });
