@@ -1,7 +1,7 @@
 'use client';
 
 import { Fragment, useEffect, useMemo, useState } from 'react';
-import type { AccountDto, EntityDto } from '@/lib/server/dto';
+import type { AccountDto, EntityDto, RuleDto } from '@/lib/server/dto';
 import { api, emitDataChanged, useApi } from '@/lib/client/api';
 import { centsToDecimalString, formatMoney, toCents, type Cents } from '@/lib/money';
 import { addDays, formatShortDate } from '@/lib/dates';
@@ -884,8 +884,20 @@ export function RescheduleModal({
 }
 
 // ---------------------------------------------------------------- Recurrencia
-export function RecurrenceFormModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+/** Alta y edición de recurrencias. Con `rule` edita (entidad y tipo no cambian). */
+export function RecurrenceFormModal({
+  open,
+  onClose,
+  rule,
+  defaultDirection = 'OUT',
+}: {
+  open: boolean;
+  onClose: () => void;
+  rule?: RuleDto | null;
+  defaultDirection?: 'IN' | 'OUT';
+}) {
   const app = useApp();
+  const editing = Boolean(rule);
   const defaultEntity = useDefaultEntityId();
   const { loading, error, run, setError } = useSubmit();
   const [entityId, setEntityId] = useState(defaultEntity);
@@ -901,48 +913,67 @@ export function RecurrenceFormModal({ open, onClose }: { open: boolean; onClose:
   useEffect(() => {
     if (!open) return;
     setError(null);
+    if (rule) {
+      setEntityId(rule.entityId);
+      setDirection(rule.direction);
+      setDescription(rule.description);
+      setCounterparty(rule.counterparty?.name ?? '');
+      setAmount(centsInput(rule.amount));
+      setFrequency(rule.frequency);
+      setStartDate(rule.startDate);
+      setEndDate(rule.endDate ?? '');
+      setPriority(rule.priority);
+      return;
+    }
     setEntityId(defaultEntity);
+    setDirection(defaultDirection);
     setDescription('');
     setCounterparty('');
     setAmount('');
+    setFrequency('MONTHLY');
     setStartDate(app.today);
     setEndDate('');
-  }, [open, defaultEntity, app.today, setError]);
+    setPriority('FIXED');
+  }, [open, rule, defaultDirection, defaultEntity, app.today, setError]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     const a = parseMoneyInput(amount);
     if (a === null || Number(a) <= 0) return setError('Monto inválido');
+    if (endDate && endDate < startDate) return setError('La fecha final es anterior a la primera fecha');
+    const common = {
+      description,
+      amount: a,
+      frequency,
+      startDate,
+      endDate: endDate || null,
+      priority,
+      counterpartyName: counterparty.trim() || null,
+    };
     const ok = await run(
       () =>
-        api('/api/recurrences', {
-          body: {
-            entityId,
-            direction,
-            description,
-            amount: a,
-            frequency,
-            startDate,
-            endDate: endDate || null,
-            priority,
-            counterpartyName: counterparty || null,
-          },
-        }),
-      'Recurrencia creada',
+        rule
+          ? api(`/api/recurrences/${rule.id}`, { method: 'PATCH', body: common })
+          : api('/api/recurrences', { body: { entityId, direction, ...common } }),
+      rule ? 'Recurrencia actualizada' : 'Recurrencia creada',
     );
     if (ok) onClose();
   }
 
   return (
-    <Modal open={open} onClose={onClose} title="Nueva recurrencia">
+    <Modal open={open} onClose={onClose} title={editing ? `Editar recurrencia: ${rule?.description ?? ''}` : 'Nueva recurrencia'}>
       <form onSubmit={submit} className="space-y-3">
         {error && <ErrorBox message={error} />}
         <div className="grid grid-cols-2 gap-3">
           <Field label="Entidad">
-            <EntitySelect value={entityId} onChange={setEntityId} />
+            {editing ? (
+              <input className="input" value={app.entityById.get(entityId)?.name ?? ''} disabled />
+            ) : (
+              <EntitySelect value={entityId} onChange={setEntityId} />
+            )}
           </Field>
           <Field label="Tipo">
-            <select className="input" value={direction} onChange={(e) => setDirection(e.target.value as 'IN' | 'OUT')}>
+            <select className="input" value={direction} onChange={(e) => setDirection(e.target.value as 'IN' | 'OUT')} disabled={editing}>
               <option value="OUT">Gasto recurrente</option>
               <option value="IN">Ingreso recurrente</option>
             </select>
@@ -983,12 +1014,18 @@ export function RecurrenceFormModal({ open, onClose }: { open: boolean; onClose:
             </select>
           </Field>
         )}
+        {editing && (
+          <p className="text-xs text-slate-500">
+            Los cambios aplican a las ocurrencias futuras proyectadas. Las que ya se pagaron, abonaron o editaron
+            individualmente conservan sus datos.
+          </p>
+        )}
         <div className="flex justify-end gap-2 pt-2">
           <Button type="button" onClick={onClose}>
             Cancelar
           </Button>
           <Button type="submit" variant="primary" loading={loading}>
-            Crear
+            {editing ? 'Guardar cambios' : 'Crear'}
           </Button>
         </div>
       </form>

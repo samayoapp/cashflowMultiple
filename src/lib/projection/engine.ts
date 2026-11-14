@@ -1,7 +1,7 @@
 import { addDays, diffDays, startOfWeek } from '@/lib/dates';
 import type { Cents } from '@/lib/money';
 import { CurrencyConverter } from './currency';
-import { expandRule } from './recurrence';
+import { occurrenceKey, pendingOccurrences } from './recurrence';
 import { convertPair } from './fx';
 import type {
   DailyPoint,
@@ -67,7 +67,7 @@ export function project(input: ProjectionInput): ProjectionResult {
 
   // 1. Obligaciones (CxC / CxP / transferencias planificadas)
   for (const ob of input.obligations) {
-    if (ob.recurrenceId && ob.occurrenceDate) materialized.add(`${ob.recurrenceId}|${ob.occurrenceDate}`);
+    if (ob.recurrenceId && ob.occurrenceDate) materialized.add(occurrenceKey(ob.recurrenceId, ob.occurrenceDate));
     const entity = entities.get(ob.entityId);
     if (!entity) continue;
     if (ob.status === 'SETTLED' || ob.status === 'CANCELLED') continue;
@@ -116,38 +116,35 @@ export function project(input: ProjectionInput): ProjectionResult {
   }
 
   // 2. Recurrencias virtuales (desde hoy)
-  for (const rule of input.rules) {
+  for (const { rule, date } of pendingOccurrences(input.rules, materialized, today, horizonEnd)) {
     const entity = entities.get(rule.entityId);
     if (!entity) continue;
-    for (const date of expandRule(rule, today, horizonEnd)) {
-      if (materialized.has(`${rule.id}|${date}`)) continue;
-      const amount = toOut(rule.amount, rule.entityId);
-      if (amount === null) continue;
-      items.push({
-        key: `rule:${rule.id}:${date}`,
-        source: 'RECURRENCE',
-        obligationId: null,
-        ruleId: rule.id,
-        entityId: rule.entityId,
-        direction: rule.direction,
-        description: rule.description,
-        counterpartyName: rule.counterpartyName ?? null,
-        categoryName: rule.categoryName ?? null,
-        amount,
-        amountNative: rule.amount,
-        nativeCurrency: entity.currency,
-        date,
-        expectedDate: date,
-        dueDate: date,
-        overdue: false,
-        priority: rule.priority,
-        isHypothetical: false,
-        simulated: false,
-        transferId: null,
-        status: 'PROJECTED',
-        weekIndex: weekIndexOf(date),
-      });
-    }
+    const amount = toOut(rule.amount, rule.entityId);
+    if (amount === null) continue;
+    items.push({
+      key: `rule:${rule.id}:${date}`,
+      source: 'RECURRENCE',
+      obligationId: null,
+      ruleId: rule.id,
+      entityId: rule.entityId,
+      direction: rule.direction,
+      description: rule.description,
+      counterpartyName: rule.counterpartyName ?? null,
+      categoryName: rule.categoryName ?? null,
+      amount,
+      amountNative: rule.amount,
+      nativeCurrency: entity.currency,
+      date,
+      expectedDate: date,
+      dueDate: date,
+      overdue: false,
+      priority: rule.priority,
+      isHypothetical: false,
+      simulated: false,
+      transferId: null,
+      status: 'PROJECTED',
+      weekIndex: weekIndexOf(date),
+    });
   }
 
   // 3. Estados de cuenta de tarjetas: cuotas pendientes agrupadas por (tarjeta, fecha límite)

@@ -1,7 +1,7 @@
 'use client';
 
 import { Fragment, useMemo, useState } from 'react';
-import { ArrowLeftRight, Ban, CalendarClock, CheckCircle2, ChevronDown, ChevronRight, Coins, CreditCard, Pencil, Plus, Search, Send, Trash2, X } from 'lucide-react';
+import { ArrowLeftRight, Ban, CalendarClock, CheckCircle2, ChevronDown, ChevronRight, Coins, CreditCard, Pencil, Plus, Repeat, Search, Send, SkipForward, Trash2, X } from 'lucide-react';
 import { useApp } from '@/components/AppContext';
 import { Badge, Button, Card, cn, EmptyState, ErrorBox, Loading, Tabs, Toggle, useToast } from '@/components/ui';
 import { EntityDot } from '@/components/AppShell';
@@ -19,7 +19,7 @@ import { CardChargeModal, CardPaymentModal, cardStatusBadge, type CardPaymentTar
 import type { CardSummaryDto } from '@/lib/server/cards';
 import { formatMoney } from '@/lib/money';
 import { formatShortDate } from '@/lib/dates';
-import type { ObligationDto, RuleDto } from '@/lib/server/dto';
+import type { ObligationDto, RuleDto, UpcomingOccurrenceDto } from '@/lib/server/dto';
 
 type Tab = 'IN' | 'OUT' | 'cards' | 'rules' | 'transfers';
 
@@ -30,14 +30,14 @@ export default function OperationsPage() {
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold">Gestión operativa</h1>
-          <p className="text-sm text-slate-500">Cuentas por cobrar, por pagar, tarjetas de crédito, recurrencias y transferencias (entre cuentas y entre entidades).</p>
+          <p className="text-sm text-slate-500">Cuentas por cobrar y por pagar (puntuales y recurrentes), tarjetas de crédito, plantillas recurrentes y transferencias.</p>
         </div>
         <Tabs<Tab>
           tabs={[
             { id: 'IN', label: 'Por cobrar' },
             { id: 'OUT', label: 'Por pagar' },
             { id: 'cards', label: 'Tarjetas' },
-            { id: 'rules', label: 'Recurrentes' },
+            { id: 'rules', label: 'Plantillas recurrentes' },
             { id: 'transfers', label: 'Transferencias' },
           ]}
           value={tab}
@@ -59,6 +59,11 @@ const STATUS_LABEL: Record<string, { label: string; tone: 'slate' | 'green' | 'a
   CANCELLED: { label: 'Cancelada', tone: 'red' },
 };
 
+/** Días hacia adelante en que se listan las ocurrencias recurrentes junto a las CxC/CxP. */
+const UPCOMING_DAYS = 90;
+
+type Row = { kind: 'ob'; date: string; ob: ObligationDto } | { kind: 'up'; date: string; up: UpcomingOccurrenceDto };
+
 function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
   const app = useApp();
   const toast = useToast();
@@ -66,31 +71,96 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
   const [priority, setPriority] = useState<'ALL' | 'FIXED' | 'FLEXIBLE'>('ALL');
   const [q, setQ] = useState('');
   const [query, setQuery] = useState('');
-  const url = `/api/obligations?ctx=${encodeURIComponent(app.ctx)}&direction=${direction}&status=${status}&transfers=exclude${query ? `&q=${encodeURIComponent(query)}` : ''}`;
+  const [origin, setOrigin] = useState<'all' | 'single' | 'recurring'>('all');
+  const qs = query ? `&q=${encodeURIComponent(query)}` : '';
+  const url = `/api/obligations?ctx=${encodeURIComponent(app.ctx)}&direction=${direction}&status=${status}&transfers=exclude${qs}`;
   const { data, error, loading } = useApi<ObligationDto[]>(url);
+  // Próximas ocurrencias de recurrencias que aún no existen como CxC/CxP
+  const showUpcoming = status !== 'closed' && origin !== 'single';
+  const upcoming = useApi<UpcomingOccurrenceDto[]>(
+    showUpcoming ? `/api/recurrences/upcoming?ctx=${encodeURIComponent(app.ctx)}&direction=${direction}&days=${UPCOMING_DAYS}${qs}` : null,
+  );
+  const [ruleForm, setRuleForm] = useState<{ open: boolean; rule: RuleDto | null }>({ open: false, rule: null });
+  const [busy, setBusy] = useState<string | null>(null);
 
   const [form, setForm] = useState<{ open: boolean; ob: ObligationDto | null }>({ open: false, ob: null });
   const [pay, setPay] = useState<{ ob: ObligationDto; full: boolean } | null>(null);
   const [move, setMove] = useState<ObligationDto | null>(null);
   const [charging, setCharging] = useState(false);
 
-  const rows = useMemo(
-    () =>
-      (data ?? []).filter(
-        (o) => (priority === 'ALL' || o.priority === priority) && (app.whatIf || !o.isHypothetical),
-      ),
-    [data, priority, app.whatIf],
-  );
+  const rows = useMemo<Row[]>(() => {
+    const obs: Row[] = (data ?? [])
+      .filter(
+        (o) =>
+          (priority === 'ALL' || o.priority === priority) &&
+          (app.whatIf || !o.isHypothetical) &&
+          (origin === 'all' || (origin === 'recurring') === Boolean(o.recurrenceId)),
+      )
+      .map((ob) => ({ kind: 'ob', date: ob.expectedDate, ob }));
+    const ups: Row[] = showUpcoming
+      ? (upcoming.data ?? []).filter((u) => priority === 'ALL' || u.priority === priority).map((up) => ({ kind: 'up', date: up.date, up }))
+      : [];
+    // Orden estable: a igual fecha, la partida real antes que la proyectada
+    return [...obs, ...ups].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  }, [data, upcoming.data, showUpcoming, priority, origin, app.whatIf]);
 
   const totals = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const o of rows) {
-      if (o.isHypothetical) continue;
-      const cur = app.entityById.get(o.entityId)?.currency ?? '—';
-      m.set(cur, (m.get(cur) ?? 0) + o.remaining);
+    const real = new Map<string, number>();
+    const projected = new Map<string, number>();
+    for (const r of rows) {
+      if (r.kind === 'ob' && r.ob.isHypothetical) continue;
+      const entityId = r.kind === 'ob' ? r.ob.entityId : r.up.entityId;
+      const cur = app.entityById.get(entityId)?.currency ?? '—';
+      const m = r.kind === 'ob' ? real : projected;
+      m.set(cur, (m.get(cur) ?? 0) + (r.kind === 'ob' ? r.ob.remaining : r.up.amount));
     }
-    return Array.from(m.entries());
+    return { real: Array.from(real.entries()), projected: Array.from(projected.entries()) };
   }, [rows, app.entityById]);
+
+  /** Convierte la ocurrencia proyectada en una CxC/CxP real para poder operarla. */
+  async function materialize(u: UpcomingOccurrenceDto): Promise<ObligationDto | null> {
+    setBusy(u.key);
+    try {
+      return await api<ObligationDto>(`/api/recurrences/${u.ruleId}/materialize`, { body: { date: u.date } });
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'Error', 'error');
+      return null;
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function onUpcoming(u: UpcomingOccurrenceDto, action: 'pay' | 'partial' | 'move' | 'edit' | 'skip') {
+    if (
+      action === 'skip' &&
+      !confirm(`¿Omitir la ocurrencia del ${formatShortDate(u.date)} de "${u.description}"? Las demás fechas de la recurrencia no cambian.`)
+    )
+      return;
+    const ob = await materialize(u);
+    if (!ob) return;
+    if (action === 'skip') {
+      try {
+        await api(`/api/obligations/${ob.id}`, { method: 'PATCH', body: { status: 'CANCELLED' } });
+        toast('Ocurrencia omitida');
+      } catch (e) {
+        toast(e instanceof Error ? e.message : 'Error', 'error');
+      }
+    } else if (action === 'pay' || action === 'partial') setPay({ ob, full: action === 'pay' });
+    else if (action === 'move') setMove(ob);
+    else setForm({ open: true, ob });
+    emitDataChanged();
+  }
+
+  async function editRule(ruleId: string) {
+    try {
+      const list = await api<RuleDto[]>(`/api/recurrences?ctx=${encodeURIComponent(app.ctx)}`);
+      const rule = list.find((r) => r.id === ruleId);
+      if (!rule) throw new Error('Recurrencia no encontrada');
+      setRuleForm({ open: true, rule });
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'Error', 'error');
+    }
+  }
 
   async function cancel(o: ObligationDto) {
     const hypo = o.isHypothetical;
@@ -137,6 +207,11 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
           <option value="closed">Liquidadas / canceladas</option>
           <option value="all">Todas</option>
         </select>
+        <select className="input w-auto" value={origin} onChange={(e) => setOrigin(e.target.value as typeof origin)}>
+          <option value="all">Puntuales y recurrentes</option>
+          <option value="single">Solo puntuales</option>
+          <option value="recurring">Solo recurrentes</option>
+        </select>
         {!isIn && (
           <select className="input w-auto" value={priority} onChange={(e) => setPriority(e.target.value as typeof priority)}>
             <option value="ALL">Toda prioridad</option>
@@ -145,9 +220,14 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
           </select>
         )}
         <div className="ml-auto flex items-center gap-3">
-          {totals.map(([cur, v]) => (
+          {totals.real.map(([cur, v]) => (
             <span key={cur} className="text-sm text-slate-500">
               Pendiente: <strong className="tabular-nums text-slate-900 dark:text-white">{formatMoney(v, cur)}</strong>
+            </span>
+          ))}
+          {totals.projected.map(([cur, v]) => (
+            <span key={`p-${cur}`} className="text-sm text-slate-500" title={`Ocurrencias recurrentes de los próximos ${UPCOMING_DAYS} días que aún no se han registrado`}>
+              Recurrentes {UPCOMING_DAYS} d: <strong className="tabular-nums text-sky-700 dark:text-sky-400">{formatMoney(v, cur)}</strong>
             </span>
           ))}
           {!isIn && (
@@ -155,20 +235,23 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
               <CreditCard className="h-4 w-4" /> Gasto con tarjeta
             </Button>
           )}
+          <Button onClick={() => setRuleForm({ open: true, rule: null })} title={isIn ? 'Nuevo ingreso recurrente' : 'Nuevo gasto recurrente'}>
+            <Repeat className="h-4 w-4" /> Recurrente
+          </Button>
           <Button variant="primary" onClick={() => setForm({ open: true, ob: null })}>
             <Plus className="h-4 w-4" /> {isIn ? 'Nueva CxC' : 'Nueva CxP'}
           </Button>
         </div>
       </div>
 
-      {error ? (
+      {error || upcoming.error ? (
         <div className="p-4">
-          <ErrorBox message={error} />
+          <ErrorBox message={(error || upcoming.error)!} />
         </div>
-      ) : loading && !data ? (
+      ) : (loading && !data) || (showUpcoming && upcoming.loading && !upcoming.data) ? (
         <Loading />
       ) : rows.length === 0 ? (
-        <EmptyState title={isIn ? 'No hay cuentas por cobrar' : 'No hay cuentas por pagar'}>Crea una con el botón de arriba.</EmptyState>
+        <EmptyState title={isIn ? 'No hay cuentas por cobrar' : 'No hay cuentas por pagar'}>Crea una con los botones de arriba.</EmptyState>
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full">
@@ -185,7 +268,61 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
               </tr>
             </thead>
             <tbody>
-              {rows.map((o) => {
+              {rows.map((row) => {
+                if (row.kind === 'up') {
+                  const u = row.up;
+                  const ue = app.entityById.get(u.entityId);
+                  const ucur = ue?.currency ?? 'HNL';
+                  const dis = busy === u.key;
+                  return (
+                    <tr key={`up:${u.key}`} className="border-t border-slate-100 bg-sky-50/40 dark:border-slate-800 dark:bg-sky-950/10">
+                      <td className="td max-w-xs">
+                        <div className="flex items-center gap-2">
+                          {app.ctx === 'all' && ue && <EntityDot color={ue.color} />}
+                          <span className="truncate font-medium">{u.description}</span>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-1 text-xs text-slate-500">
+                          {u.counterparty?.name ?? 'Sin contraparte'}
+                          <Badge tone="blue">Recurrente · {FREQ[u.frequency]}</Badge>
+                          {!isIn && <Badge tone={u.priority === 'FIXED' ? 'amber' : 'slate'}>{u.priority === 'FIXED' ? 'Inamovible' : 'Flexible'}</Badge>}
+                        </div>
+                      </td>
+                      <td className="td text-slate-500">{formatShortDate(u.date)}</td>
+                      <td className="td">{formatShortDate(u.date)}</td>
+                      <td className="td num">{formatMoney(u.amount, ucur)}</td>
+                      <td className="td num text-slate-500">—</td>
+                      <td className={cn('td num font-semibold', isIn ? 'text-emerald-700 dark:text-emerald-400' : 'text-rose-700 dark:text-rose-400')}>
+                        {formatMoney(u.amount, ucur)}
+                      </td>
+                      <td className="td">
+                        <Badge tone="blue">Programada</Badge>
+                      </td>
+                      <td className="td">
+                        <div className="flex justify-end gap-0.5">
+                          <Button size="sm" variant="ghost" disabled={dis} title={isIn ? 'Marcar cobrado' : 'Marcar pagado'} onClick={() => onUpcoming(u, 'pay')}>
+                            <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                          </Button>
+                          <Button size="sm" variant="ghost" disabled={dis} title="Abono parcial" onClick={() => onUpcoming(u, 'partial')}>
+                            <Coins className="h-4 w-4" />
+                          </Button>
+                          <Button size="sm" variant="ghost" disabled={dis} title="Reprogramar esta fecha" onClick={() => onUpcoming(u, 'move')}>
+                            <CalendarClock className="h-4 w-4" />
+                          </Button>
+                          <Button size="sm" variant="ghost" disabled={dis} title="Editar solo esta ocurrencia" onClick={() => onUpcoming(u, 'edit')}>
+                            <Pencil className="h-4 w-4" />
+                          </Button>
+                          <Button size="sm" variant="ghost" disabled={dis} title="Editar la recurrencia (todas las fechas futuras)" onClick={() => editRule(u.ruleId)}>
+                            <Repeat className="h-4 w-4 text-sky-600" />
+                          </Button>
+                          <Button size="sm" variant="ghost" disabled={dis} title="Omitir esta ocurrencia" onClick={() => onUpcoming(u, 'skip')}>
+                            <SkipForward className="h-4 w-4 text-rose-500" />
+                          </Button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                }
+                const o = row.ob;
                 const e = app.entityById.get(o.entityId);
                 const cur = e?.currency ?? 'HNL';
                 const overdue = (o.status === 'OPEN' || o.status === 'PARTIAL') && o.expectedDate < app.today;
@@ -236,8 +373,13 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
                           </Button>
                         )}
                         {o.status !== 'CANCELLED' && (
-                          <Button size="sm" variant="ghost" title="Editar" onClick={() => setForm({ open: true, ob: o })}>
+                          <Button size="sm" variant="ghost" title={o.recurrenceId ? 'Editar solo esta ocurrencia' : 'Editar'} onClick={() => setForm({ open: true, ob: o })}>
                             <Pencil className="h-4 w-4" />
+                          </Button>
+                        )}
+                        {o.recurrenceId && (
+                          <Button size="sm" variant="ghost" title="Editar la recurrencia (todas las fechas futuras)" onClick={() => editRule(o.recurrenceId!)}>
+                            <Repeat className="h-4 w-4 text-sky-600" />
                           </Button>
                         )}
                         {!closed && (
@@ -256,6 +398,12 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
       )}
 
       <ObligationFormModal open={form.open} onClose={() => setForm({ open: false, ob: null })} direction={direction} obligation={form.ob} hypothetical={app.whatIf} />
+      <RecurrenceFormModal
+        open={ruleForm.open}
+        rule={ruleForm.rule}
+        defaultDirection={direction}
+        onClose={() => setRuleForm({ open: false, rule: null })}
+      />
       <PaymentModal open={Boolean(pay)} onClose={() => setPay(null)} target={pay?.ob ?? null} full={pay?.full} />
       <RescheduleModal open={Boolean(move)} onClose={() => setMove(null)} target={move} />
       {!isIn && <CardChargeModal open={charging} onClose={() => setCharging(false)} />}
@@ -269,7 +417,7 @@ function RulesTab() {
   const app = useApp();
   const toast = useToast();
   const { data, error, loading } = useApi<RuleDto[]>(`/api/recurrences?ctx=${encodeURIComponent(app.ctx)}`);
-  const [creating, setCreating] = useState(false);
+  const [form, setForm] = useState<{ open: boolean; rule: RuleDto | null }>({ open: false, rule: null });
 
   async function toggle(r: RuleDto, active: boolean) {
     try {
@@ -283,8 +431,11 @@ function RulesTab() {
   return (
     <Card className="p-0 sm:p-0">
       <div className="flex items-center justify-between border-b border-slate-200 p-3 dark:border-slate-800">
-        <p className="text-sm text-slate-500">Las ocurrencias futuras se proyectan automáticamente desde hoy.</p>
-        <Button variant="primary" onClick={() => setCreating(true)}>
+        <p className="text-sm text-slate-500">
+          Plantillas de ingresos y gastos que se repiten. Sus próximas ocurrencias aparecen en Por cobrar / Por pagar con la etiqueta
+          Recurrente.
+        </p>
+        <Button variant="primary" onClick={() => setForm({ open: true, rule: null })}>
           <Plus className="h-4 w-4" /> Nueva recurrencia
         </Button>
       </div>
@@ -308,6 +459,7 @@ function RulesTab() {
                 <th className="th">Hasta</th>
                 <th className="th text-right">Monto</th>
                 <th className="th">Activa</th>
+                <th className="th" />
               </tr>
             </thead>
             <tbody>
@@ -331,6 +483,11 @@ function RulesTab() {
                     <td className="td">
                       <Toggle checked={r.active} onChange={(v) => toggle(r, v)} />
                     </td>
+                    <td className="td text-right">
+                      <Button size="sm" variant="ghost" title="Editar" onClick={() => setForm({ open: true, rule: r })}>
+                        <Pencil className="h-4 w-4" />
+                      </Button>
+                    </td>
                   </tr>
                 );
               })}
@@ -338,7 +495,7 @@ function RulesTab() {
           </table>
         </div>
       )}
-      <RecurrenceFormModal open={creating} onClose={() => setCreating(false)} />
+      <RecurrenceFormModal open={form.open} rule={form.rule} onClose={() => setForm({ open: false, rule: null })} />
     </Card>
   );
 }

@@ -107,3 +107,18 @@ export function ruleDto(r: Prisma.RecurringRuleGetPayload<{ include: typeof rule
   };
 }
 export type RuleDto = ReturnType<typeof ruleDto>;
+
+/** Ocurrencia futura de una recurrencia que aún no existe como CxC/CxP (ver /api/recurrences/upcoming). */
+export interface UpcomingOccurrenceDto {
+  key: string;
+  ruleId: string;
+  entityId: string;
+  direction: RuleDto['direction'];
+  description: string;
+  amount: number;
+  date: string;
+  frequency: RuleDto['frequency'];
+  priority: RuleDto['priority'];
+  counterparty: RuleDto['counterparty'];
+  category: RuleDto['category'];
+}
