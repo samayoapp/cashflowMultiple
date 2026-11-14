@@ -21,7 +21,9 @@
 set -euo pipefail
 
 # ---- Configuración (ajustar) ------------------------------------------------
-SSH_HOST="${SSH_HOST:-usuario@servidor-oficina}"
+# Por defecto: pixeldrive en la red de la oficina. Fuera de la oficina usa la IP de Tailscale:
+#   SSH_HOST=asamayoa@100.x.x.x ./deploy.sh
+SSH_HOST="${SSH_HOST:-asamayoa@192.168.100.90}"
 REMOTE_DIR="${REMOTE_DIR:-/opt/cashflow-publimatec}"
 BRANCH="${BRANCH:-master}"
 # -----------------------------------------------------------------------------
