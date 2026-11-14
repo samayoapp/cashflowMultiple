@@ -564,8 +564,8 @@ function TransfersTab() {
       <Card className="p-0 sm:p-0">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 p-3 dark:border-slate-800">
           <div>
-            <h2 className="font-medium">Entre cuentas de una entidad</h2>
-            <p className="text-sm text-slate-500">Banco → caja chica, entre bancos, etc. Se registra al momento y no cambia la caja total de la entidad.</p>
+            <h2 className="font-medium">Entre cuentas de una unidad de negocio</h2>
+            <p className="text-sm text-slate-500">Banco → caja chica, entre bancos, etc. Se registra al momento y no cambia la caja total de la unidad de negocio.</p>
           </div>
           <Button variant="primary" onClick={() => setCreatingInternal(true)}>
             <ArrowLeftRight className="h-4 w-4" /> Transferir entre cuentas
@@ -584,7 +584,7 @@ function TransfersTab() {
             <table className="w-full">
               <thead className="bg-slate-50 dark:bg-slate-800/50">
                 <tr>
-                  <th className="th">Entidad</th>
+                  <th className="th">Unidad de negocio</th>
                   <th className="th">Cuentas</th>
                   <th className="th">Fecha</th>
                   <th className="th text-right">Monto</th>
@@ -635,10 +635,10 @@ function TransfersTab() {
       <Card className="p-0 sm:p-0">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 p-3 dark:border-slate-800">
           <div>
-            <h2 className="font-medium">Entre entidades</h2>
+            <h2 className="font-medium">Entre unidades de negocio</h2>
             <p className="text-sm text-slate-500">En la vista consolidada estos movimientos se netean y no inflan ingresos ni gastos.</p>
           </div>
-          <Button variant="primary" onClick={() => setCreating(true)} disabled={!canTransfer} title={canTransfer ? '' : 'Necesitas al menos dos entidades'}>
+          <Button variant="primary" onClick={() => setCreating(true)} disabled={!canTransfer} title={canTransfer ? '' : 'Necesitas al menos dos unidades de negocio'}>
             <Plus className="h-4 w-4" /> Nueva transferencia
           </Button>
         </div>
@@ -649,7 +649,7 @@ function TransfersTab() {
       ) : loading && !data ? (
         <Loading />
       ) : !data?.length ? (
-        <EmptyState title="Sin transferencias entre entidades" />
+        <EmptyState title="Sin transferencias entre unidades de negocio" />
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full">
@@ -756,7 +756,7 @@ function CardsTab() {
     return (
       <Card>
         <EmptyState title="Sin tarjetas de crédito">
-          Crea una en Configuración → Cuentas con el tipo &quot;Tarjeta de crédito&quot;, su día de corte y su día límite de pago.
+          Crea una en Ajustes → Cuentas y tarjetas con el tipo &quot;Tarjeta de crédito&quot;, su día de corte y su día límite de pago.
         </EmptyState>
       </Card>
     );
@@ -1016,7 +1016,7 @@ function CycleBar({ cycle, cur, detail }: { cycle: NonNullable<CardSummaryDto['c
             tone={over || willExceed ? 'red' : undefined}
           />
         ) : (
-          <Stat label="Presupuesto del ciclo" value="Sin definir" sub="Defínelo en Configuración → Cuentas → Editar" />
+          <Stat label="Presupuesto del ciclo" value="Sin definir" sub="Defínelo en Ajustes → Cuentas y tarjetas → Editar" />
         )}
       </div>
     </div>

@@ -157,14 +157,14 @@ export default function InboxPage() {
         ) : loading && !data ? (
           <Loading />
         ) : !data?.length ? (
-          <EmptyState title="La bandeja está vacía">Genera un webhook por entidad en Configuración → Entidades e integraciones.</EmptyState>
+          <EmptyState title="La bandeja está vacía">Genera un webhook por unidad de negocio en Ajustes → Datos e integración.</EmptyState>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full">
               <thead className="bg-slate-50 dark:bg-slate-800/50">
                 <tr>
                   <th className="th">Recibido</th>
-                  <th className="th">Entidad</th>
+                  <th className="th">Unidad de negocio</th>
                   <th className="th">Descripción</th>
                   <th className="th">Tipo</th>
                   <th className="th">Vence</th>
@@ -322,7 +322,7 @@ function CardApprovalFields({
   value: CardForm;
   onChange: (v: CardForm) => void;
 }) {
-  if (loaded && cards.length === 0) return <ErrorBox message="La entidad no tiene tarjetas de crédito." />;
+  if (loaded && cards.length === 0) return <ErrorBox message="La unidad de negocio no tiene tarjetas de crédito." />;
   return (
     <>
       <Field label="Tarjeta">

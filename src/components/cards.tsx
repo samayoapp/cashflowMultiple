@@ -186,7 +186,7 @@ export function CardChargeModal({
       if (!ownerName.trim()) return setError('Indica la persona dueña de la tarjeta');
       owner = { kind: 'PERSON', name: ownerName.trim() };
     } else {
-      if (!ownerEntityId) return setError('Selecciona la entidad dueña de la tarjeta');
+      if (!ownerEntityId) return setError('Selecciona la unidad de negocio dueña de la tarjeta');
       const at = sameCurrency ? parsed : parseMoneyInput(amountTo);
       if (!at || Number(at) <= 0) return setError(`Indica el monto en ${ownerEntity?.currency}`);
       owner = { kind: 'ENTITY', entityId: ownerEntityId, amountTo: at, cardAccountId: ownerCardId || null };
@@ -206,15 +206,15 @@ export function CardChargeModal({
         {error && <ErrorBox message={error} />}
         <Tabs<Mode>
           tabs={[
-            { id: 'card', label: 'Tarjeta de la entidad' },
-            { id: 'third', label: 'Pagado por tercero / otra entidad' },
+            { id: 'card', label: 'Tarjeta de la unidad de negocio' },
+            { id: 'third', label: 'Pagado por tercero / otra unidad de negocio' },
           ]}
           value={mode}
           onChange={setMode}
         />
         <div className="grid grid-cols-2 gap-3">
           {!fixedEntityId && (
-            <Field label="Entidad que registra el gasto">
+            <Field label="Unidad de negocio que registra el gasto">
               <select className="input" value={entityId} onChange={(e) => setEntityId(e.target.value)} required>
                 {app.activeEntities.map((e) => (
                   <option key={e.id} value={e.id}>
@@ -227,7 +227,7 @@ export function CardChargeModal({
           {mode === 'card' && (
             <Field label="Tarjeta">
               {accounts.data && cards.length === 0 ? (
-                <p className="text-sm text-rose-600">Esta entidad no tiene tarjetas. Créala en Configuración → Cuentas.</p>
+                <p className="text-sm text-rose-600">Esta unidad de negocio no tiene tarjetas. Créala en Ajustes → Cuentas y tarjetas.</p>
               ) : (
                 <select className="input" value={cardId} onChange={(e) => setCardId(e.target.value)} required disabled={Boolean(fixedCardId)}>
                   {cards.map((c) => (
@@ -308,12 +308,12 @@ export function CardChargeModal({
         {mode === 'third' && (
           <div className="space-y-3 rounded-lg border border-slate-200 p-3 dark:border-slate-700">
             <p className="text-xs text-slate-500">
-              El gasto queda clasificado en esta entidad y se crea una CxP de reembolso a favor del dueño de la tarjeta.
+              El gasto queda clasificado en esta unidad de negocio y se crea una CxP de reembolso a favor del dueño de la tarjeta.
             </p>
             <Tabs<'PERSON' | 'ENTITY'>
               tabs={[
                 { id: 'PERSON', label: 'Persona' },
-                { id: 'ENTITY', label: 'Otra entidad' },
+                { id: 'ENTITY', label: 'Otra unidad de negocio' },
               ]}
               value={ownerKind}
               onChange={setOwnerKind}
@@ -325,7 +325,7 @@ export function CardChargeModal({
             ) : (
               <>
                 <div className="grid grid-cols-2 gap-3">
-                  <Field label="Entidad dueña">
+                  <Field label="Unidad de negocio dueña">
                     <select className="input" value={ownerEntityId} onChange={(e) => setOwnerEntityId(e.target.value)}>
                       <option value="">Selecciona…</option>
                       {app.activeEntities
@@ -480,7 +480,7 @@ export function CardPaymentModal({ open, onClose, target }: { open: boolean; onC
           )}
         </div>
         {accounts.data && sources.length === 0 ? (
-          <ErrorBox message="La entidad no tiene cuentas líquidas activas para pagar la tarjeta." />
+          <ErrorBox message="La unidad de negocio no tiene cuentas líquidas activas para pagar la tarjeta." />
         ) : (
           <Field label="Cuenta de origen">
             <select className="input" value={fromAccountId} onChange={(e) => setFrom(e.target.value)} required>

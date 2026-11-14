@@ -15,6 +15,7 @@ import {
   Moon,
   Plus,
   Settings,
+  SlidersHorizontal,
   Sun,
   Table2,
   TrendingUp,
@@ -31,6 +32,7 @@ const NAV = [
   { href: '/matrix', label: 'Matriz de flujo', icon: Table2 },
   { href: '/operations', label: 'CxC / CxP', icon: ArrowLeftRight },
   { href: '/inbox', label: 'Bandeja externa', icon: Inbox },
+  { href: '/unit-settings', label: 'Ajustes', icon: SlidersHorizontal },
   { href: '/settings', label: 'Configuración', icon: Settings },
 ];
 
@@ -58,7 +60,7 @@ function ContextSwitcher() {
         className="flex min-w-[12rem] items-center gap-2 rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-medium hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:hover:bg-slate-800"
       >
         {current ? <EntityDot color={current.color} /> : <Layers className="h-4 w-4 text-slate-500" />}
-        <span className="truncate">{current ? current.name : 'Todas las entidades'}</span>
+        <span className="truncate">{current ? current.name : 'Todas las unidades de negocio'}</span>
         <span className="ml-auto text-xs text-slate-500">{app.currency}</span>
         <ChevronDown className="h-4 w-4 text-slate-400" />
       </button>
@@ -100,7 +102,7 @@ function ContextSwitcher() {
                 }}
                 className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-brand-700 hover:bg-brand-50 dark:text-brand-400 dark:hover:bg-brand-500/10"
               >
-                <Plus className="h-4 w-4" /> Nueva entidad
+                <Plus className="h-4 w-4" /> Nueva unidad de negocio
               </button>
             </>
           )}

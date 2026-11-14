@@ -102,12 +102,12 @@ export function EntityFormModal({
         ? await api<EntityDto>(`/api/entities/${entity.id}`, { method: 'PATCH', body })
         : await api<EntityDto>('/api/entities', { body });
       await onSaved?.(saved);
-    }, entity ? 'Entidad actualizada' : 'Entidad creada');
+    }, entity ? 'Unidad de negocio actualizada' : 'Unidad de negocio creada');
     if (ok) onClose();
   }
 
   return (
-    <Modal open={open} onClose={onClose} title={entity ? 'Editar entidad' : 'Nueva entidad'}>
+    <Modal open={open} onClose={onClose} title={entity ? 'Editar unidad de negocio' : 'Nueva unidad de negocio'}>
       <form onSubmit={submit} className="space-y-3">
         {error && <ErrorBox message={error} />}
         <Field label="Nombre">
@@ -332,7 +332,7 @@ export function AccountFormModal({ open, onClose, account }: { open: boolean; on
       <form onSubmit={submit} className="space-y-3">
         {error && <ErrorBox message={error} />}
         {!editing && (
-          <Field label="Entidad">
+          <Field label="Unidad de negocio">
             <EntitySelect value={entityId} onChange={setEntityId} />
           </Field>
         )}
@@ -611,7 +611,7 @@ export function ObligationFormModal({
       <form onSubmit={submit} className="space-y-3">
         {error && <ErrorBox message={error} />}
         {!obligation && (
-          <Field label="Entidad">
+          <Field label="Unidad de negocio">
             <EntitySelect value={entityId} onChange={setEntityId} />
           </Field>
         )}
@@ -762,7 +762,7 @@ export function PaymentModal({
           {target.description} · Pendiente: <strong>{formatMoney(target.remaining, currency)}</strong>
         </p>
         {accounts.data && active.length === 0 ? (
-          <ErrorBox message="Esta entidad no tiene cuentas activas. Crea una en Configuración → Cuentas." />
+          <ErrorBox message="Esta unidad de negocio no tiene cuentas activas. Crea una en Ajustes → Cuentas y tarjetas." />
         ) : (
           <Field label={target.direction === 'IN' ? '¿A qué cuenta cae el dinero?' : 'Cuenta que paga'}>
             <select className="input" value={accountId} onChange={(e) => setAccountId(e.target.value)} required autoFocus={mustChoose}>
@@ -965,7 +965,7 @@ export function RecurrenceFormModal({
       <form onSubmit={submit} className="space-y-3">
         {error && <ErrorBox message={error} />}
         <div className="grid grid-cols-2 gap-3">
-          <Field label="Entidad">
+          <Field label="Unidad de negocio">
             {editing ? (
               <input className="input" value={app.entityById.get(entityId)?.name ?? ''} disabled />
             ) : (
@@ -1077,7 +1077,7 @@ export function TransferFormModal({ open, onClose }: { open: boolean; onClose: (
   }
 
   return (
-    <Modal open={open} onClose={onClose} title="Transferencia entre entidades">
+    <Modal open={open} onClose={onClose} title="Transferencia entre unidades de negocio">
       <form onSubmit={submit} className="space-y-3">
         {error && <ErrorBox message={error} />}
         <Field label="Tipo">
@@ -1271,11 +1271,11 @@ export function InternalTransferModal({ open, onClose }: { open: boolean; onClos
     <Modal open={open} onClose={onClose} title="Transferencia entre cuentas">
       <form onSubmit={submit} className="space-y-3">
         {error && <ErrorBox message={error} />}
-        <Field label="Entidad">
+        <Field label="Unidad de negocio">
           <EntitySelect value={entityId} onChange={setEntityId} />
         </Field>
         {accounts.data && liquid.length < 2 ? (
-          <ErrorBox message="Esta entidad necesita al menos dos cuentas activas (banco, caja o billetera)." />
+          <ErrorBox message="Esta unidad de negocio necesita al menos dos cuentas activas (banco, caja o billetera)." />
         ) : (
           <div className="grid grid-cols-2 gap-3">
             <Field label="Sale de">
@@ -1304,7 +1304,7 @@ export function InternalTransferModal({ open, onClose }: { open: boolean; onClos
           <input className="input" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="p. ej. Fondeo de caja chica" />
         </Field>
         <p className="text-xs text-slate-500">
-          Se registra al momento: mueve el saldo entre las dos cuentas sin cambiar la caja total de la entidad. Para pagar una tarjeta usa la pestaña Tarjetas.
+          Se registra al momento: mueve el saldo entre las dos cuentas sin cambiar la caja total de la unidad de negocio. Para pagar una tarjeta usa la pestaña Tarjetas.
         </p>
         <div className="flex justify-end gap-2 pt-2">
           <Button type="button" onClick={onClose}>

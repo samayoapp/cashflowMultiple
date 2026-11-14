@@ -143,7 +143,7 @@ export default function DashboardPage() {
 
       {result.missingRates.length > 0 && (
         <ErrorBox
-          message={`Faltan tasas de cambio para: ${result.missingRates.join(', ')}. Esos montos no se incluyen en el consolidado. Configúralas en Configuración → Tasas.`}
+          message={`Faltan tasas de cambio para: ${result.missingRates.join(', ')}. Esos montos no se incluyen en el consolidado. Configúralas en Configuración → Tasas de cambio.`}
         />
       )}
 
@@ -237,7 +237,7 @@ export default function DashboardPage() {
         </Card>
 
         <Card className="min-w-0 lg:col-span-2">
-          <h2 className="mb-3 text-sm font-semibold">{consolidated ? 'Desglose por origen' : 'Resumen de la entidad'}</h2>
+          <h2 className="mb-3 text-sm font-semibold">{consolidated ? 'Desglose por origen' : 'Resumen de la unidad de negocio'}</h2>
           <div className="space-y-4">
             {result.byEntity.map((b) => {
               const e = entities.find((x) => x.id === b.entityId);

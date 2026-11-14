@@ -3,7 +3,7 @@ import './globals.css';
 
 export const metadata: Metadata = {
   title: 'Cashflow Publimatec',
-  description: 'Tesorería operativa y flujo de efectivo proyectado multi-entidad',
+  description: 'Tesorería operativa y flujo de efectivo proyectado con varias unidades de negocio',
   icons: { icon: '/icon.svg' },
 };
 
