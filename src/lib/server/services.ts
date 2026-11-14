@@ -294,6 +294,86 @@ export async function executeTransfer(args: {
   });
 }
 
+/**
+ * Transferencia entre cuentas líquidas de UNA misma entidad (p. ej. banco → caja chica).
+ * No cambia la caja de la entidad, así que no genera partidas proyectadas: se ejecuta
+ * al momento con dos movimientos espejo (TRANSFER) ligados al mismo AccountTransfer.
+ */
+export async function createInternalTransfer(args: {
+  entityId: string;
+  fromAccountId: string;
+  toAccountId: string;
+  amount: Cents;
+  date: ISODate;
+  description: string | null;
+  userId: string;
+}) {
+  if (args.fromAccountId === args.toAccountId) throw badRequest('Origen y destino deben ser cuentas distintas');
+  return prisma.$transaction(async (tx) => {
+    const [fromAcc, toAcc] = await Promise.all([
+      tx.account.findUnique({ where: { id: args.fromAccountId } }),
+      tx.account.findUnique({ where: { id: args.toAccountId } }),
+    ]);
+    if (!fromAcc || fromAcc.entityId !== args.entityId) throw badRequest('Cuenta de origen inválida');
+    if (!toAcc || toAcc.entityId !== args.entityId) throw badRequest('Cuenta de destino inválida');
+    if (fromAcc.archivedAt || toAcc.archivedAt) throw badRequest('No se puede usar una cuenta archivada');
+    if (fromAcc.type === 'CREDIT_CARD' || toAcc.type === 'CREDIT_CARD') {
+      throw badRequest('Para pagar una tarjeta usa Operaciones → Tarjetas → Pagar');
+    }
+
+    const date = dbDate(args.date);
+    const label = args.description || 'Transferencia interna';
+    const t = await tx.accountTransfer.create({
+      data: {
+        entityId: args.entityId,
+        fromAccountId: fromAcc.id,
+        toAccountId: toAcc.id,
+        amount: dec(args.amount),
+        date,
+        description: args.description,
+        createdById: args.userId,
+      },
+    });
+    await tx.cashMovement.createMany({
+      data: [
+        {
+          entityId: args.entityId,
+          accountId: fromAcc.id,
+          type: 'TRANSFER',
+          amount: dec(-args.amount),
+          date,
+          description: `${label} → ${toAcc.name}`,
+          accountTransferId: t.id,
+          createdById: args.userId,
+        },
+        {
+          entityId: args.entityId,
+          accountId: toAcc.id,
+          type: 'TRANSFER',
+          amount: dec(args.amount),
+          date,
+          description: `${label} ← ${fromAcc.name}`,
+          accountTransferId: t.id,
+          createdById: args.userId,
+        },
+      ],
+    });
+    return t;
+  });
+}
+
+/** Anula una transferencia interna: borra sus dos movimientos y la marca cancelada (queda en la bitácora). */
+export async function voidInternalTransfer(id: string) {
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "AccountTransfer" WHERE id = ${id} FOR UPDATE`;
+    const t = await tx.accountTransfer.findUnique({ where: { id } });
+    if (!t) throw notFound('Transferencia no encontrada');
+    if (t.status !== 'EXECUTED') throw conflict('La transferencia ya está anulada');
+    await tx.cashMovement.deleteMany({ where: { accountTransferId: t.id, type: 'TRANSFER' } });
+    return tx.accountTransfer.update({ where: { id: t.id }, data: { status: 'CANCELLED' } });
+  });
+}
+
 /** Conciliación rápida: ajusta el saldo real de una cuenta al saldo del banco. */
 export async function reconcileAccount(args: {
   accountId: string;

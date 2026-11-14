@@ -137,6 +137,7 @@ model Entity {
   cardCharges      CardCharge[]
   cardInstallments CardInstallment[]
   cardPayments     CardPayment[]
+  accountTransfers AccountTransfer[]
 }
 
 model ExchangeRate {
@@ -185,6 +186,8 @@ model Account {
   cardInstallments        CardInstallment[]
   cardPayments            CardPayment[]     @relation("CardPaymentCard")
   cardPaymentsFrom        CardPayment[]     @relation("CardPaymentFrom")
+  transfersOut            AccountTransfer[] @relation("AccountTransferFrom")
+  transfersIn             AccountTransfer[] @relation("AccountTransferTo")
 
   @@index([entityId])
 }
@@ -199,11 +202,14 @@ model CashMovement {
   date            DateTime             @db.Date
   description     String?
   transferId      String?
+  /// Transferencia entre cuentas de la misma entidad
+  accountTransferId String?
   createdById     String?
   createdAt       DateTime             @default(now())
   entity          Entity               @relation(fields: [entityId], references: [id], onDelete: Restrict)
   account         Account              @relation(fields: [accountId], references: [id], onDelete: Restrict)
   transfer        InterEntityTransfer? @relation(fields: [transferId], references: [id], onDelete: SetNull)
+  accountTransfer AccountTransfer?     @relation(fields: [accountTransferId], references: [id], onDelete: SetNull)
   payment         Payment?
   cardCharge      CardCharge?
   cardPaymentBank CardPayment?         @relation("CardPaymentBankMovement")
@@ -212,6 +218,7 @@ model CashMovement {
   @@index([entityId, date])
   @@index([accountId])
   @@index([transferId])
+  @@index([accountTransferId])
 }
 
 model Counterparty {
@@ -342,6 +349,28 @@ model InterEntityTransfer {
 
   @@index([fromEntityId])
   @@index([toEntityId])
+}
+
+/// Transferencia entre cuentas líquidas de UNA misma entidad. Se ejecuta al momento
+/// (dos CashMovement TRANSFER espejo); no genera partidas proyectadas.
+model AccountTransfer {
+  id            String         @id @default(uuid())
+  entityId      String
+  fromAccountId String
+  toAccountId   String
+  amount        Decimal        @db.Decimal(18, 2)
+  date          DateTime       @db.Date
+  status        TransferStatus @default(EXECUTED)
+  description   String?
+  createdById   String?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  entity        Entity         @relation(fields: [entityId], references: [id], onDelete: Restrict)
+  fromAccount   Account        @relation("AccountTransferFrom", fields: [fromAccountId], references: [id], onDelete: Restrict)
+  toAccount     Account        @relation("AccountTransferTo", fields: [toAccountId], references: [id], onDelete: Restrict)
+  movements     CashMovement[]
+
+  @@index([entityId, date])
 }
 
 model Scenario {

@@ -724,9 +724,17 @@ export function PaymentModal({
     if (payingWithCard && target) setAmount(centsInput(target.remaining));
   }, [payingWithCard, target]);
 
+  // En un cobro hay que elegir a qué cuenta cae el dinero (salvo que solo haya una);
+  // en un pago se propone la primera cuenta.
+  const mustChoose = target?.direction === 'IN' && active.length > 1;
   useEffect(() => {
-    if (active.length && !active.some((a) => a.id === accountId)) setAccountId(active[0].id);
-  }, [active, accountId]);
+    if (open) setAccountId('');
+  }, [open, target?.id]);
+  useEffect(() => {
+    if (accountId && active.some((a) => a.id === accountId)) return;
+    if (accountId) setAccountId('');
+    else if (active.length && !mustChoose) setAccountId(active[0].id);
+  }, [active, accountId, mustChoose]);
 
   if (!target) return null;
   const currency = app.entityById.get(target.entityId)?.currency ?? 'HNL';
@@ -756,8 +764,9 @@ export function PaymentModal({
         {accounts.data && active.length === 0 ? (
           <ErrorBox message="Esta entidad no tiene cuentas activas. Crea una en Configuración → Cuentas." />
         ) : (
-          <Field label={target.direction === 'IN' ? 'Cuenta que recibe' : 'Cuenta que paga'}>
-            <select className="input" value={accountId} onChange={(e) => setAccountId(e.target.value)} required>
+          <Field label={target.direction === 'IN' ? '¿A qué cuenta cae el dinero?' : 'Cuenta que paga'}>
+            <select className="input" value={accountId} onChange={(e) => setAccountId(e.target.value)} required autoFocus={mustChoose}>
+              {mustChoose && <option value="">Selecciona la cuenta que recibe…</option>}
               {active.map((a) => (
                 <option key={a.id} value={a.id}>
                   {isCard(a) ? `💳 ${a.name} · deuda ${formatMoney(Math.max(-a.balance, 0), currency)}` : `${a.name} · ${formatMoney(a.balance, currency)}`}
@@ -1163,6 +1172,109 @@ export function ExecuteTransferModal({
           </Button>
           <Button type="submit" variant="primary" loading={loading} disabled={!fromAccountId || !toAccountId}>
             Ejecutar
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+// ---------------------------------------------------------------- Transferencia entre cuentas de una entidad
+export function InternalTransferModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const app = useApp();
+  const defaultEntity = useDefaultEntityId();
+  const { loading, error, run, setError } = useSubmit();
+  const [entityId, setEntityId] = useState(defaultEntity);
+  const [fromAccountId, setFromAcc] = useState('');
+  const [toAccountId, setToAcc] = useState('');
+  const [amount, setAmount] = useState('');
+  const [date, setDate] = useState(app.today);
+  const [description, setDescription] = useState('');
+  const accounts = useApi<AccountDto[]>(open && entityId ? `/api/accounts?ctx=${entityId}` : null);
+  const liquid = useMemo(() => liquidAccounts(accounts.data), [accounts.data]);
+
+  useEffect(() => {
+    if (!open) return;
+    setError(null);
+    setEntityId(defaultEntity);
+    setAmount('');
+    setDate(app.today);
+    setDescription('');
+  }, [open, defaultEntity, app.today, setError]);
+
+  useEffect(() => {
+    setFromAcc('');
+    setToAcc('');
+  }, [entityId, open]);
+
+  const currency = app.entityById.get(entityId)?.currency ?? 'HNL';
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    const a = parseMoneyInput(amount);
+    if (!a || Number(a) <= 0) return setError('Monto inválido');
+    if (fromAccountId === toAccountId) return setError('Elige dos cuentas distintas');
+    const ok = await run(
+      () =>
+        api('/api/transfers/internal', {
+          body: { entityId, fromAccountId, toAccountId, amount: a, date, description: description || null },
+        }),
+      'Transferencia registrada',
+    );
+    if (ok) onClose();
+  }
+
+  const accountOption = (a: AccountDto) => (
+    <option key={a.id} value={a.id}>
+      {a.name} · {formatMoney(a.balance, currency)}
+    </option>
+  );
+
+  return (
+    <Modal open={open} onClose={onClose} title="Transferencia entre cuentas">
+      <form onSubmit={submit} className="space-y-3">
+        {error && <ErrorBox message={error} />}
+        <Field label="Entidad">
+          <EntitySelect value={entityId} onChange={setEntityId} />
+        </Field>
+        {accounts.data && liquid.length < 2 ? (
+          <ErrorBox message="Esta entidad necesita al menos dos cuentas activas (banco, caja o billetera)." />
+        ) : (
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Sale de">
+              <select className="input" value={fromAccountId} onChange={(e) => setFromAcc(e.target.value)} required>
+                <option value="">Selecciona…</option>
+                {liquid.filter((a) => a.id !== toAccountId).map(accountOption)}
+              </select>
+            </Field>
+            <Field label="Entra a">
+              <select className="input" value={toAccountId} onChange={(e) => setToAcc(e.target.value)} required>
+                <option value="">Selecciona…</option>
+                {liquid.filter((a) => a.id !== fromAccountId).map(accountOption)}
+              </select>
+            </Field>
+          </div>
+        )}
+        <div className="grid grid-cols-2 gap-3">
+          <Field label={`Monto (${currency})`}>
+            <input className="input text-right" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} required />
+          </Field>
+          <Field label="Fecha real">
+            <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
+          </Field>
+        </div>
+        <Field label="Descripción (opcional)">
+          <input className="input" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="p. ej. Fondeo de caja chica" />
+        </Field>
+        <p className="text-xs text-slate-500">
+          Se registra al momento: mueve el saldo entre las dos cuentas sin cambiar la caja total de la entidad. Para pagar una tarjeta usa la pestaña Tarjetas.
+        </p>
+        <div className="flex justify-end gap-2 pt-2">
+          <Button type="button" onClick={onClose}>
+            Cancelar
+          </Button>
+          <Button type="submit" variant="primary" loading={loading} disabled={!fromAccountId || !toAccountId}>
+            Transferir
           </Button>
         </div>
       </form>

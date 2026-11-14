@@ -1,12 +1,13 @@
 'use client';
 
 import { Fragment, useMemo, useState } from 'react';
-import { Ban, CalendarClock, CheckCircle2, ChevronDown, ChevronRight, Coins, CreditCard, Pencil, Plus, Search, Send, Trash2, X } from 'lucide-react';
+import { ArrowLeftRight, Ban, CalendarClock, CheckCircle2, ChevronDown, ChevronRight, Coins, CreditCard, Pencil, Plus, Search, Send, Trash2, X } from 'lucide-react';
 import { useApp } from '@/components/AppContext';
 import { Badge, Button, Card, cn, EmptyState, ErrorBox, Loading, Tabs, Toggle, useToast } from '@/components/ui';
 import { EntityDot } from '@/components/AppShell';
 import {
   ExecuteTransferModal,
+  InternalTransferModal,
   ObligationFormModal,
   PaymentModal,
   RecurrenceFormModal,
@@ -29,7 +30,7 @@ export default function OperationsPage() {
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold">Gestión operativa</h1>
-          <p className="text-sm text-slate-500">Cuentas por cobrar, por pagar, tarjetas de crédito, recurrencias y transferencias entre entidades.</p>
+          <p className="text-sm text-slate-500">Cuentas por cobrar, por pagar, tarjetas de crédito, recurrencias y transferencias (entre cuentas y entre entidades).</p>
         </div>
         <Tabs<Tab>
           tabs={[
@@ -355,13 +356,26 @@ interface TransferRow {
   description: string | null;
 }
 
+interface InternalTransferRow {
+  id: string;
+  entityId: string;
+  status: 'EXECUTED' | 'CANCELLED';
+  fromAccountName: string;
+  toAccountName: string;
+  amount: number;
+  date: string;
+  description: string | null;
+}
+
 const KIND: Record<string, string> = { LOAN: 'Préstamo', CONTRIBUTION: 'Aporte', TRANSFER: 'Transferencia' };
 
 function TransfersTab() {
   const app = useApp();
   const toast = useToast();
   const { data, error, loading } = useApi<TransferRow[]>(`/api/transfers?ctx=${encodeURIComponent(app.ctx)}`);
+  const internalRows = useApi<InternalTransferRow[]>(`/api/transfers/internal?ctx=${encodeURIComponent(app.ctx)}`);
   const [creating, setCreating] = useState(false);
+  const [creatingInternal, setCreatingInternal] = useState(false);
   const [executing, setExecuting] = useState<TransferRow | null>(null);
 
   async function cancel(t: TransferRow) {
@@ -375,16 +389,102 @@ function TransfersTab() {
     }
   }
 
+  async function voidInternal(t: InternalTransferRow) {
+    if (!confirm('¿Anular esta transferencia entre cuentas? Se revierten los saldos de ambas cuentas.')) return;
+    try {
+      await api(`/api/transfers/internal/${t.id}`, { body: { action: 'void' } });
+      toast('Transferencia anulada');
+      emitDataChanged();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'Error', 'error');
+    }
+  }
+
   const canTransfer = app.activeEntities.length >= 2;
 
   return (
-    <Card className="p-0 sm:p-0">
-      <div className="flex items-center justify-between border-b border-slate-200 p-3 dark:border-slate-800">
-        <p className="text-sm text-slate-500">En la vista consolidada estos movimientos se netean y no inflan ingresos ni gastos.</p>
-        <Button variant="primary" onClick={() => setCreating(true)} disabled={!canTransfer} title={canTransfer ? '' : 'Necesitas al menos dos entidades'}>
-          <Plus className="h-4 w-4" /> Nueva transferencia
-        </Button>
-      </div>
+    <div className="space-y-4">
+      <Card className="p-0 sm:p-0">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 p-3 dark:border-slate-800">
+          <div>
+            <h2 className="font-medium">Entre cuentas de una entidad</h2>
+            <p className="text-sm text-slate-500">Banco → caja chica, entre bancos, etc. Se registra al momento y no cambia la caja total de la entidad.</p>
+          </div>
+          <Button variant="primary" onClick={() => setCreatingInternal(true)}>
+            <ArrowLeftRight className="h-4 w-4" /> Transferir entre cuentas
+          </Button>
+        </div>
+        {internalRows.error ? (
+          <div className="p-4">
+            <ErrorBox message={internalRows.error} />
+          </div>
+        ) : internalRows.loading && !internalRows.data ? (
+          <Loading />
+        ) : !internalRows.data?.length ? (
+          <EmptyState title="Sin transferencias entre cuentas" />
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead className="bg-slate-50 dark:bg-slate-800/50">
+                <tr>
+                  <th className="th">Entidad</th>
+                  <th className="th">Cuentas</th>
+                  <th className="th">Fecha</th>
+                  <th className="th text-right">Monto</th>
+                  <th className="th">Estado</th>
+                  <th className="th text-right">Acciones</th>
+                </tr>
+              </thead>
+              <tbody>
+                {internalRows.data.map((t) => {
+                  const ent = app.entityById.get(t.entityId);
+                  const voided = t.status === 'CANCELLED';
+                  return (
+                    <tr key={t.id} className={cn('border-t border-slate-100 dark:border-slate-800', voided && 'opacity-60')}>
+                      <td className="td">
+                        <span className="inline-flex items-center gap-1.5">
+                          {ent && <EntityDot color={ent.color} />} {ent?.name ?? '—'}
+                        </span>
+                      </td>
+                      <td className="td">
+                        <div className="font-medium">
+                          {t.fromAccountName} → {t.toAccountName}
+                        </div>
+                        {t.description && <div className="text-xs text-slate-500">{t.description}</div>}
+                      </td>
+                      <td className="td">{formatShortDate(t.date)}</td>
+                      <td className="td num">{formatMoney(t.amount, ent?.currency ?? 'HNL')}</td>
+                      <td className="td">
+                        <Badge tone={voided ? 'red' : 'green'}>{voided ? 'Anulada' : 'Ejecutada'}</Badge>
+                      </td>
+                      <td className="td">
+                        {!voided && (
+                          <div className="flex justify-end gap-1">
+                            <Button size="sm" variant="ghost" onClick={() => voidInternal(t)} title="Anular">
+                              <Ban className="h-4 w-4 text-rose-500" />
+                            </Button>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+
+      <Card className="p-0 sm:p-0">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 p-3 dark:border-slate-800">
+          <div>
+            <h2 className="font-medium">Entre entidades</h2>
+            <p className="text-sm text-slate-500">En la vista consolidada estos movimientos se netean y no inflan ingresos ni gastos.</p>
+          </div>
+          <Button variant="primary" onClick={() => setCreating(true)} disabled={!canTransfer} title={canTransfer ? '' : 'Necesitas al menos dos entidades'}>
+            <Plus className="h-4 w-4" /> Nueva transferencia
+          </Button>
+        </div>
       {error ? (
         <div className="p-4">
           <ErrorBox message={error} />
@@ -449,9 +549,11 @@ function TransfersTab() {
           </table>
         </div>
       )}
+      </Card>
       <TransferFormModal open={creating} onClose={() => setCreating(false)} />
       <ExecuteTransferModal open={Boolean(executing)} onClose={() => setExecuting(null)} transfer={executing} />
-    </Card>
+      <InternalTransferModal open={creatingInternal} onClose={() => setCreatingInternal(false)} />
+    </div>
   );
 }
 
