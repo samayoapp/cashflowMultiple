@@ -9,7 +9,7 @@ export const dynamic = 'force-dynamic';
 export const POST = route<{ params: { id: string } }>(async (req, { params }) => {
   await requireAdmin();
   const entity = await prisma.entity.findUnique({ where: { id: params.id } });
-  if (!entity) throw notFound('Entidad no encontrada');
+  if (!entity) throw notFound('Unidad de negocio no encontrada');
   const { token, hash, hint } = generateWebhookToken();
   await prisma.entity.update({ where: { id: entity.id }, data: { webhookTokenHash: hash, webhookTokenHint: hint } });
   const base = process.env.APP_URL || new URL(req.url).origin;

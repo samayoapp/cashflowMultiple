@@ -118,6 +118,8 @@ model Entity {
   color            String    @default("#10b981")
   minCashThreshold Decimal   @default(0) @db.Decimal(18, 2)
   isDefault        Boolean   @default(false)
+  /// Orden visual en menú y ajustes (la Base siempre va primero)
+  sortOrder        Int       @default(0)
   archivedAt       DateTime?
   webhookTokenHash String?   @unique
   webhookTokenHint String?

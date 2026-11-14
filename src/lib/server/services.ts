@@ -39,7 +39,7 @@ export async function registerPayment(args: {
     if (args.amount > remaining) throw badRequest('El abono supera el saldo pendiente');
 
     const account = await tx.account.findUnique({ where: { id: args.accountId } });
-    if (!account || account.entityId !== ob.entityId) throw badRequest('La cuenta no pertenece a la entidad');
+    if (!account || account.entityId !== ob.entityId) throw badRequest('La cuenta no pertenece a la unidad de negocio');
     if (account.archivedAt) throw badRequest('La cuenta está archivada');
     const isCard = account.type === 'CREDIT_CARD';
     if (isCard && ob.direction === 'IN') throw badRequest('Un cobro no puede registrarse en una tarjeta de crédito');
@@ -178,12 +178,12 @@ export async function createTransfer(args: TransferArgs) {
 
 /** Igual que createTransfer, dentro de una transacción existente. */
 export async function createTransferTx(tx: Tx, args: TransferArgs) {
-  if (args.fromEntityId === args.toEntityId) throw badRequest('Origen y destino deben ser entidades distintas');
+  if (args.fromEntityId === args.toEntityId) throw badRequest('Origen y destino deben ser unidades de negocio distintas');
   const [from, to] = await Promise.all([
     tx.entity.findUnique({ where: { id: args.fromEntityId } }),
     tx.entity.findUnique({ where: { id: args.toEntityId } }),
   ]);
-  if (!from || !to) throw notFound('Entidad no encontrada');
+  if (!from || !to) throw notFound('Unidad de negocio no encontrada');
 
   const label =
     args.description ||
@@ -252,7 +252,7 @@ export async function executeTransfer(args: {
     if (!fromAcc || fromAcc.entityId !== t.fromEntityId) throw badRequest('Cuenta de origen inválida');
     if (!toAcc || toAcc.entityId !== t.toEntityId) throw badRequest('Cuenta de destino inválida');
     if (fromAcc.type === 'CREDIT_CARD' || toAcc.type === 'CREDIT_CARD') {
-      throw badRequest('Las transferencias entre entidades usan cuentas líquidas, no tarjetas');
+      throw badRequest('Las transferencias entre unidades de negocio usan cuentas líquidas, no tarjetas');
     }
 
     const obligations = await tx.obligation.findMany({ where: { transferId: t.id } });

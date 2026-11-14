@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { prisma } from '@/lib/server/db';
 import { ok, readJson, route } from '@/lib/server/api';
 import { requireAdmin, requireUser } from '@/lib/server/auth';
-import { getAllowedEntityIds } from '@/lib/server/scope';
+import { ENTITY_ORDER, getAllowedEntityIds } from '@/lib/server/scope';
 import { entityDto } from '@/lib/server/dto';
 import { dec } from '@/lib/server/serialize';
 import { currency, hexColor, nonNegativeMoney, shortText } from '@/lib/validation';
@@ -14,7 +14,7 @@ export const GET = route(async () => {
   const ids = await getAllowedEntityIds(user, { includeArchived: true });
   const rows = await prisma.entity.findMany({
     where: { id: { in: ids } },
-    orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }],
+    orderBy: ENTITY_ORDER,
   });
   return ok(rows.map(entityDto));
 });
@@ -29,8 +29,11 @@ const createSchema = z.object({
 export const POST = route(async (req) => {
   await requireAdmin();
   const data = createSchema.parse(await readJson(req));
+  // Las nuevas entidades van al final del orden manual
+  const last = await prisma.entity.aggregate({ _max: { sortOrder: true } });
   const e = await prisma.entity.create({
     data: {
+      sortOrder: (last._max.sortOrder ?? 0) + 1,
       name: data.name,
       currency: data.currency,
       color: data.color,

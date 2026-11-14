@@ -34,7 +34,7 @@ AppSetting (fila única)     ExchangeRate (tabla de tasas)
 
 | Tabla | Para qué existe |
 |---|---|
-| **Entity** | Unidad de negocio. Moneda base, color identificador, umbral mínimo de caja, `isDefault` (Entidad Base creada en el primer arranque, única por índice parcial), `archivedAt` (se archiva, nunca se borra) y el **hash** SHA‑256 del token de webhook (el token completo solo se muestra una vez). |
+| **Entity** | Unidad de negocio. Moneda base, color identificador, umbral mínimo de caja, `isDefault` (entidad Base: creada en el primer arranque, única por índice parcial, transferible a otra entidad con `POST /api/entities/:id/make-default`; aparece primero y no se archiva ni elimina), `archivedAt` (una entidad con datos se archiva, nunca se borra; solo una entidad vacía puede eliminarse con `DELETE /api/entities/:id`) y el **hash** SHA‑256 del token de webhook (el token completo solo se muestra una vez). |
 | **User / UserEntityAccess** | `ADMIN` ve y administra todo. `USER` solo opera las entidades asignadas. Contraseñas con bcrypt (cost 12). |
 | **AppSetting** | Fila única: moneda de reporte del consolidado (HNL) y zona horaria que define "hoy". |
 | **ExchangeRate** | Tasa `from → to` por fecha de vigencia. Solo se usa para **presentar** el consolidado; los saldos se guardan siempre en la moneda nativa de la entidad. El motor usa la tasa vigente más reciente, su inversa o un cruce. |

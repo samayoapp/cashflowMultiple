@@ -15,7 +15,7 @@ export async function resolveCounterparty(
 ): Promise<string | null | undefined> {
   if (input.counterpartyId) {
     const c = await db.counterparty.findUnique({ where: { id: input.counterpartyId } });
-    if (!c || c.entityId !== entityId) throw badRequest('La contraparte no pertenece a la entidad');
+    if (!c || c.entityId !== entityId) throw badRequest('La contraparte no pertenece a la unidad de negocio');
     return c.id;
   }
   const name = input.counterpartyName?.trim();
@@ -34,6 +34,6 @@ export async function resolveCounterparty(
 export async function assertCategory(db: Db, entityId: string, categoryId: string | null | undefined) {
   if (!categoryId) return categoryId;
   const c = await db.category.findUnique({ where: { id: categoryId } });
-  if (!c || c.entityId !== entityId) throw badRequest('La categoría no pertenece a la entidad');
+  if (!c || c.entityId !== entityId) throw badRequest('La categoría no pertenece a la unidad de negocio');
   return c.id;
 }

@@ -29,11 +29,11 @@ async function main() {
   await seedCardDemo(today, admin.id);
 
   if (await prisma.entity.findFirst({ where: { name: DEMO_NAME } })) {
-    console.log('La entidad demo ya existe. Nada más que hacer.');
+    console.log('La unidad de negocio demo ya existe. Nada más que hacer.');
     return;
   }
   const base = await prisma.entity.findFirst({ where: { isDefault: true } });
-  if (!base) throw new Error('No existe la Entidad Base. Ejecuta el bootstrap primero.');
+  if (!base) throw new Error('No existe la unidad de negocio Base. Ejecuta el bootstrap primero.');
 
   // --- Tasas de cambio (no se duplican gracias al índice único) ---
   const rateDate = d(addDays(today, -30));
@@ -131,9 +131,9 @@ async function main() {
 
     // What-If: compra de equipo hipotética
     await ob(base.id, 'OUT', '¿Compra de cámara y lentes?', 280000, 22, { hypothetical: true, priority: 'FLEXIBLE', counterparty: 'Proveedor de equipo' });
-    console.log('  -> Datos demo cargados en la Entidad Base');
+    console.log('  -> Datos demo cargados en la unidad de negocio Base');
   } else {
-    console.log('  -> La Entidad Base ya tiene cuentas: no se modifica');
+    console.log('  -> La unidad de negocio Base ya tiene cuentas: no se modifica');
   }
 
   // ---------------- Entidad demo (USD) ----------------
@@ -168,8 +168,8 @@ async function main() {
     userId: admin.id,
   });
 
-  console.log(`  -> Entidad demo creada: ${DEMO_NAME}`);
-  console.log('Listo. Abre el dashboard y alterna entre la vista consolidada y cada entidad.');
+  console.log(`  -> Unidad de negocio demo creada: ${DEMO_NAME}`);
+  console.log('Listo. Abre el dashboard y alterna entre la vista consolidada y cada unidad de negocio.');
 }
 
 const CARD_NAME = 'Visa Empresarial (demo)';

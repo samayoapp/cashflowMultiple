@@ -1,6 +1,6 @@
 import { prisma } from './db';
 import { cents, isoOf, isoOrNull, dbDate } from './serialize';
-import type { ResolvedContext } from './scope';
+import { ENTITY_ORDER, type ResolvedContext } from './scope';
 import { todayInTz } from '@/lib/dates';
 import { cardRateFor, getCurrentFx } from './fx';
 import type {
@@ -109,7 +109,7 @@ export async function loadProjectionInput(ctx: ResolvedContext, whatIf: boolean)
   const entityIds = ctx.entityIds;
 
   const [entities, balances, obligations, rules, scenarioId, rates, cardInstallments] = await Promise.all([
-    prisma.entity.findMany({ where: { id: { in: entityIds } }, orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }] }),
+    prisma.entity.findMany({ where: { id: { in: entityIds } }, orderBy: ENTITY_ORDER }),
     getAccountBalances(entityIds),
     prisma.obligation.findMany({
       where: {

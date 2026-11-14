@@ -1,7 +1,7 @@
 import { prisma } from '@/lib/server/db';
 import { ok, route } from '@/lib/server/api';
 import { requireUser } from '@/lib/server/auth';
-import { getAllowedEntityIds, resolveContext, resolveWhatIf } from '@/lib/server/scope';
+import { ENTITY_ORDER, getAllowedEntityIds, resolveContext, resolveWhatIf } from '@/lib/server/scope';
 import { entityDto } from '@/lib/server/dto';
 import { getSettings } from '@/lib/server/projection-data';
 import { todayInTz } from '@/lib/dates';
@@ -17,7 +17,7 @@ export const GET = route(async (req) => {
   const allIds = await getAllowedEntityIds(user, { includeArchived: true });
   const activeIds = await getAllowedEntityIds(user);
   const [entities, settings, pendingStaging, fx] = await Promise.all([
-    prisma.entity.findMany({ where: { id: { in: allIds } }, orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }] }),
+    prisma.entity.findMany({ where: { id: { in: allIds } }, orderBy: ENTITY_ORDER }),
     getSettings(),
     prisma.stagingItem.count({ where: { entityId: { in: activeIds }, status: 'PENDING' } }),
     getCurrentFx(),

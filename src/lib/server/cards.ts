@@ -49,7 +49,7 @@ async function lockCard(tx: Tx, cardId: string) {
 
 async function entityCurrency(tx: Tx, entityId: string) {
   const e = await tx.entity.findUnique({ where: { id: entityId }, select: { currency: true } });
-  if (!e) throw notFound('Entidad no encontrada');
+  if (!e) throw notFound('Unidad de negocio no encontrada');
   return e.currency;
 }
 
@@ -291,7 +291,7 @@ export async function payCreditCard(args: {
     const card = await lockCard(tx, args.cardId);
     if (card.type !== 'CREDIT_CARD') throw badRequest('La cuenta destino no es una tarjeta de crédito');
     const from = await tx.account.findUnique({ where: { id: args.fromAccountId } });
-    if (!from || from.entityId !== card.entityId) throw badRequest('La cuenta de origen no pertenece a la entidad');
+    if (!from || from.entityId !== card.entityId) throw badRequest('La cuenta de origen no pertenece a la unidad de negocio');
     if (from.type === 'CREDIT_CARD') throw badRequest('Una tarjeta no puede pagarse con otra tarjeta');
     if (from.archivedAt) throw badRequest('La cuenta de origen está archivada');
     const base = await entityCurrency(tx, card.entityId);
@@ -446,7 +446,7 @@ export async function createReimbursedExpense(args: {
     }
 
     const owner = args.owner;
-    if (owner.entityId === args.entityId) throw badRequest('La entidad dueña debe ser distinta');
+    if (owner.entityId === args.entityId) throw badRequest('La unidad de negocio dueña debe ser distinta');
     const t = await createTransferTx(tx, {
       kind: 'TRANSFER',
       fromEntityId: args.entityId,
@@ -463,7 +463,7 @@ export async function createReimbursedExpense(args: {
     // está clasificado en la entidad que lo reembolsa; así no se cuenta dos veces).
     if (owner.cardAccountId) {
       const card = await lockCard(tx, owner.cardAccountId);
-      if (card.entityId !== owner.entityId) throw badRequest('La tarjeta no pertenece a la entidad dueña');
+      if (card.entityId !== owner.entityId) throw badRequest('La tarjeta no pertenece a la unidad de negocio dueña');
       const mv = await tx.cashMovement.create({
         data: {
           entityId: card.entityId,

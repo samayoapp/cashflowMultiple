@@ -141,7 +141,7 @@ export async function setOpening(
     if (args.currency && args.currency !== account.foreignCurrency) throw badRequest('La tarjeta no maneja esa moneda');
     return setCardOpening(tx, account, args.currency, args.kind ?? 'STATEMENT', args.amount, args.date, args.userId);
   }
-  if (args.currency) throw badRequest('Las cuentas líquidas solo tienen saldo en la moneda de la entidad');
+  if (args.currency) throw badRequest('Las cuentas líquidas solo tienen saldo en la moneda de la unidad de negocio');
   return setLiquidOpening(tx, account, args.amount, args.date, args.userId);
 }
 

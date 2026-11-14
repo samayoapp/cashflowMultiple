@@ -1,4 +1,5 @@
 import { cookies } from 'next/headers';
+import type { Prisma } from '@prisma/client';
 import { prisma } from './db';
 import { badRequest, forbidden, notFound } from './api';
 import type { CurrentUser } from './auth';
@@ -11,6 +12,13 @@ export const CONTEXT_COOKIE = 'cf_ctx';
 export const WHATIF_COOKIE = 'cf_whatif';
 export const ALL_ENTITIES = 'all';
 
+/** Orden de las entidades en toda la app: la Base primero, luego el orden manual y la fecha de creación. */
+export const ENTITY_ORDER = [
+  { isDefault: 'desc' },
+  { sortOrder: 'asc' },
+  { createdAt: 'asc' },
+] satisfies Prisma.EntityOrderByWithRelationInput[];
+
 /** Entidades a las que el usuario tiene acceso (incluye archivadas si se pide). */
 export async function getAllowedEntityIds(user: CurrentUser, opts: { includeArchived?: boolean } = {}) {
   const rows = await prisma.entity.findMany({
@@ -19,15 +27,15 @@ export async function getAllowedEntityIds(user: CurrentUser, opts: { includeArch
       ...(opts.includeArchived ? {} : { archivedAt: null }),
     },
     select: { id: true },
-    orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }],
+    orderBy: ENTITY_ORDER,
   });
   return rows.map((r) => r.id);
 }
 
 export async function assertEntityAccess(user: CurrentUser, entityId: string) {
-  if (!entityId) throw badRequest('Falta la entidad');
+  if (!entityId) throw badRequest('Falta la unidad de negocio');
   const exists = await prisma.entity.findUnique({ where: { id: entityId }, select: { id: true } });
-  if (!exists) throw notFound('Entidad no encontrada');
+  if (!exists) throw notFound('Unidad de negocio no encontrada');
   if (user.role !== 'ADMIN' && !user.entityIds.includes(entityId)) throw forbidden();
 }
 

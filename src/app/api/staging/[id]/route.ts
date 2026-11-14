@@ -58,7 +58,7 @@ export const POST = route<{ params: { id: string } }>(async (req, { params }) =>
 
   if (data.action === 'approve_card') {
     const card = await prisma.account.findUnique({ where: { id: data.cardAccountId } });
-    if (!card || card.entityId !== item.entityId) throw badRequest('La tarjeta no pertenece a la entidad del elemento');
+    if (!card || card.entityId !== item.entityId) throw badRequest('La tarjeta no pertenece a la unidad de negocio del elemento');
     const description = data.description ?? item.description;
     const amount = data.amount ?? (item.amount ? cents(item.amount) : null);
     if (!description || !amount) throw badRequest('Completa descripción y monto antes de aprobar');

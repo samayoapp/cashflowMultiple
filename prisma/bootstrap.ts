@@ -22,13 +22,13 @@ async function main() {
   if (!anyEntity) {
     await prisma.entity.create({
       data: {
-        name: process.env.DEFAULT_ENTITY_NAME || 'Entidad Base',
+        name: process.env.DEFAULT_ENTITY_NAME || 'Unidad de negocio Base',
         currency: process.env.DEFAULT_ENTITY_CURRENCY || 'HNL',
         color: '#10b981',
         isDefault: true,
       },
     });
-    console.log('  -> Entidad Base creada');
+    console.log('  -> Unidad de negocio Base creada');
   }
 
   const scenario = await prisma.scenario.findFirst({ where: { isDefault: true } });

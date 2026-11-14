@@ -45,7 +45,7 @@ export function resolveForeignCurrency(dual: boolean | undefined, entityCurrency
   if (!dual) return null;
   if (entityCurrency === 'HNL') return 'USD';
   if (entityCurrency === 'USD') return 'HNL';
-  throw badRequest('Las tarjetas bimoneda solo están disponibles para entidades en HNL o USD');
+  throw badRequest('Las tarjetas bimoneda solo están disponibles para unidades de negocio en HNL o USD');
 }
 
 export function refineCard(
@@ -61,6 +61,6 @@ export function refineCard(
 export async function assertPaymentAccount(accountId: string | null | undefined, entityId: string) {
   if (!accountId) return;
   const acc = await prisma.account.findUnique({ where: { id: accountId } });
-  if (!acc || acc.entityId !== entityId) throw badRequest('La cuenta de pago no pertenece a la entidad');
+  if (!acc || acc.entityId !== entityId) throw badRequest('La cuenta de pago no pertenece a la unidad de negocio');
   if (acc.type === 'CREDIT_CARD') throw badRequest('La cuenta de pago debe ser una cuenta líquida');
 }
