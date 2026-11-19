@@ -7,6 +7,7 @@ import { Badge, Button, Card, cn, EmptyState, ErrorBox, Loading, Tabs, Toggle, u
 import { EntityDot } from '@/components/AppShell';
 import {
   ExecuteTransferModal,
+  LoanRepaymentModal,
   InternalTransferModal,
   ObligationFormModal,
   confirmDeleteRecurrence,
@@ -19,6 +20,7 @@ import {
 import { api, emitDataChanged, useApi } from '@/lib/client/api';
 import { CardChargeModal, CardPaymentModal, cardStatusBadge, type CardPaymentTarget } from '@/components/cards';
 import type { CardSummaryDto } from '@/lib/server/cards';
+import type { TransferDto } from '@/lib/server/dto';
 import { formatMoney } from '@/lib/money';
 import { addMonths, endOfMonth, formatDateYear, formatShortDate } from '@/lib/dates';
 import type { ObligationDto, RuleDto, UpcomingOccurrenceDto } from '@/lib/server/dto';
@@ -113,7 +115,7 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
   // Pendientes: lo más urgente primero. Historial: lo más reciente primero.
   const order = status === 'open' ? 'asc' : 'desc';
   const qs = query ? `&q=${encodeURIComponent(query)}` : '';
-  const params = new URLSearchParams({ ctx: app.ctx, direction, status, transfers: 'exclude', order, limit: String(LIST_LIMIT) });
+  const params = new URLSearchParams({ ctx: app.ctx, direction, status, transfers: 'loans', order, limit: String(LIST_LIMIT) });
   if (query) params.set('q', query);
   if (range.from) params.set('from', range.from);
   if (range.to) params.set('to', range.to);
@@ -130,6 +132,7 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
   const [pay, setPay] = useState<{ ob: ObligationDto; full: boolean } | null>(null);
   const [move, setMove] = useState<ObligationDto | null>(null);
   const [charging, setCharging] = useState(false);
+  const [loanPay, setLoanPay] = useState<{ id: string; partial: boolean } | null>(null);
 
   const rows = useMemo<Row[]>(() => {
     const obs: Row[] = (data ?? [])
@@ -231,6 +234,18 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
     try {
       await api(`/api/obligations/${o.id}`, { method: 'PATCH', body: { status: 'CANCELLED' } });
       toast(o.recurrenceId ? 'Fecha omitida' : 'Partida cancelada');
+      emitDataChanged();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'Error', 'error');
+    }
+  }
+
+  async function cancelLoan(o: ObligationDto) {
+    if (!o.loanRepayment) return;
+    if (!confirm(`¿Cancelar el saldo pendiente de "${o.description}"? Se cancela en ambas unidades; los abonos ya hechos se conservan.`)) return;
+    try {
+      await api(`/api/transfers/${o.loanRepayment.transferId}`, { body: { action: 'cancel' } });
+      toast('Saldo del préstamo cancelado');
       emitDataChanged();
     } catch (e) {
       toast(e instanceof Error ? e.message : 'Error', 'error');
@@ -454,6 +469,7 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
                         {o.counterparty?.name ?? 'Sin contraparte'}
                         {o.isHypothetical && <Badge tone="violet">Hipotética</Badge>}
                         {o.recurrenceId && <Badge tone="blue">Recurrente</Badge>}
+                        {o.loanRepayment && <Badge tone="violet">Préstamo entre unidades</Badge>}
                         {!isIn && <Badge tone={o.priority === 'FIXED' ? 'amber' : 'slate'}>{o.priority === 'FIXED' ? 'Inamovible' : 'Flexible'}</Badge>}
                       </div>
                     </td>
@@ -478,6 +494,26 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
                       <Badge tone={st.tone}>{st.label}</Badge>
                     </td>
                     <td className="td">
+                      {o.loanRepayment ? (
+                        <div className="flex justify-end gap-0.5">
+                          {!closed && (
+                            <>
+                              <Button size="sm" variant="ghost" title="Saldar todo lo pendiente" onClick={() => setLoanPay({ id: o.loanRepayment!.transferId, partial: false })}>
+                                <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                              </Button>
+                              <Button size="sm" variant="ghost" title="Registrar abono" onClick={() => setLoanPay({ id: o.loanRepayment!.transferId, partial: true })}>
+                                <Coins className="h-4 w-4" />
+                              </Button>
+                              <Button size="sm" variant="ghost" title="Reprogramar (ambas unidades)" onClick={() => setMove(o)}>
+                                <CalendarClock className="h-4 w-4" />
+                              </Button>
+                              <Button size="sm" variant="ghost" title="Cancelar el saldo pendiente" onClick={() => cancelLoan(o)}>
+                                <Ban className="h-4 w-4 text-rose-500" />
+                              </Button>
+                            </>
+                          )}
+                        </div>
+                      ) : (
                       <div className="flex justify-end gap-0.5">
                         {!closed && !o.isHypothetical && (
                           <>
@@ -520,6 +556,7 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
                           </Button>
                         )}
                       </div>
+                      )}
                     </td>
                   </tr>
                 );
@@ -538,6 +575,7 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
       />
       <PaymentModal open={Boolean(pay)} onClose={() => setPay(null)} target={pay?.ob ?? null} full={pay?.full} />
       <RescheduleModal open={Boolean(move)} onClose={() => setMove(null)} target={move} />
+      <ExecuteTransferModal open={Boolean(loanPay)} onClose={() => setLoanPay(null)} transfer={loanPay} partial={loanPay?.partial} />
       {!isIn && <CardChargeModal open={charging} onClose={() => setCharging(false)} />}
     </Card>
   );
@@ -646,18 +684,7 @@ function RulesTab() {
   );
 }
 
-interface TransferRow {
-  id: string;
-  kind: 'LOAN' | 'CONTRIBUTION' | 'TRANSFER';
-  status: 'PLANNED' | 'EXECUTED' | 'CANCELLED';
-  fromEntityId: string;
-  toEntityId: string;
-  amountFrom: number;
-  amountTo: number;
-  expectedDate: string;
-  executedDate: string | null;
-  description: string | null;
-}
+type TransferRow = TransferDto;
 
 interface InternalTransferRow {
   id: string;
@@ -679,10 +706,16 @@ function TransfersTab() {
   const internalRows = useApi<InternalTransferRow[]>(`/api/transfers/internal?ctx=${encodeURIComponent(app.ctx)}`);
   const [creating, setCreating] = useState(false);
   const [creatingInternal, setCreatingInternal] = useState(false);
-  const [executing, setExecuting] = useState<TransferRow | null>(null);
+  const [executing, setExecuting] = useState<{ id: string; partial: boolean } | null>(null);
+  const [programming, setProgramming] = useState<TransferRow | null>(null);
 
   async function cancel(t: TransferRow) {
-    if (!confirm('¿Cancelar esta transferencia planificada?')) return;
+    const msg = t.repaymentOfId
+      ? '¿Cancelar el saldo pendiente de esta devolución? Los abonos ya hechos se conservan.'
+      : t.kind === 'LOAN' && t.repayment
+        ? '¿Cancelar este préstamo? Su devolución programada también se cancela.'
+        : '¿Cancelar esta transferencia planificada?';
+    if (!confirm(msg)) return;
     try {
       await api(`/api/transfers/${t.id}`, { body: { action: 'cancel' } });
       toast('Transferencia cancelada');
@@ -817,8 +850,9 @@ function TransfersTab() {
                 return (
                   <tr key={t.id} className="border-t border-slate-100 dark:border-slate-800">
                     <td className="td">
-                      <div className="font-medium">{KIND[t.kind]}</div>
+                      <div className="font-medium">{t.repaymentOfId ? 'Devolución de préstamo' : KIND[t.kind]}</div>
                       <div className="text-xs text-slate-500">{t.description}</div>
+                      {t.interest > 0 && <div className="text-xs text-slate-500">Incluye interés {formatMoney(t.interest, to?.currency ?? 'HNL')}</div>}
                     </td>
                     <td className="td">
                       <span className="inline-flex items-center gap-1.5">
@@ -827,23 +861,58 @@ function TransfersTab() {
                     </td>
                     <td className="td">{formatDateYear(t.executedDate ?? t.expectedDate, app.today)}</td>
                     <td className="td num">{formatMoney(t.amountFrom, from?.currency ?? 'HNL')}</td>
-                    <td className="td num">{formatMoney(t.amountTo, to?.currency ?? 'HNL')}</td>
-                    <td className="td">
-                      <Badge tone={t.status === 'EXECUTED' ? 'green' : t.status === 'CANCELLED' ? 'red' : 'slate'}>
-                        {t.status === 'EXECUTED' ? 'Ejecutada' : t.status === 'CANCELLED' ? 'Cancelada' : 'Planificada'}
-                      </Badge>
-                    </td>
-                    <td className="td">
-                      {t.status === 'PLANNED' && (
-                        <div className="flex justify-end gap-1">
-                          <Button size="sm" onClick={() => setExecuting(t)}>
-                            <Send className="h-3.5 w-3.5" /> Ejecutar
-                          </Button>
-                          <Button size="sm" variant="ghost" onClick={() => cancel(t)} title="Cancelar">
-                            <Ban className="h-4 w-4 text-rose-500" />
-                          </Button>
+                    <td className="td num">
+                      {formatMoney(t.amountTo, to?.currency ?? 'HNL')}
+                      {t.repaymentOfId && t.paidTo > 0 && (
+                        <div className="text-[11px] font-normal text-slate-500">
+                          Abonado {formatMoney(t.paidTo, to?.currency ?? 'HNL')} · resta {formatMoney(t.remainingTo, to?.currency ?? 'HNL')}
                         </div>
                       )}
+                    </td>
+                    <td className="td">
+                      <Badge tone={t.status === 'EXECUTED' ? 'green' : t.status === 'CANCELLED' ? 'red' : t.paidTo > 0 ? 'amber' : 'slate'}>
+                        {t.status === 'EXECUTED'
+                          ? t.repaymentOfId
+                            ? 'Saldada'
+                            : 'Ejecutada'
+                          : t.status === 'CANCELLED'
+                            ? 'Cancelada'
+                            : t.paidTo > 0
+                              ? 'Con abonos'
+                              : 'Planificada'}
+                      </Badge>
+                      {t.kind === 'LOAN' && !t.repaymentOfId && t.repayment && (
+                        <div className="mt-0.5 text-[11px] text-slate-500">Devolución programada</div>
+                      )}
+                    </td>
+                    <td className="td">
+                      <div className="flex justify-end gap-1">
+                        {t.status === 'PLANNED' && t.repaymentOfId && (
+                          <>
+                            <Button size="sm" onClick={() => setExecuting({ id: t.id, partial: true })}>
+                              <Coins className="h-3.5 w-3.5" /> Abonar
+                            </Button>
+                            <Button size="sm" variant="ghost" title="Saldar todo lo pendiente" onClick={() => setExecuting({ id: t.id, partial: false })}>
+                              <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                            </Button>
+                          </>
+                        )}
+                        {t.status === 'PLANNED' && !t.repaymentOfId && (
+                          <Button size="sm" onClick={() => setExecuting({ id: t.id, partial: false })}>
+                            <Send className="h-3.5 w-3.5" /> Ejecutar
+                          </Button>
+                        )}
+                        {t.kind === 'LOAN' && !t.repaymentOfId && !t.repayment && t.status !== 'CANCELLED' && (
+                          <Button size="sm" onClick={() => setProgramming(t)} title="Crear la CxC/CxP de la devolución">
+                            <CalendarClock className="h-3.5 w-3.5" /> Programar devolución
+                          </Button>
+                        )}
+                        {t.status === 'PLANNED' && (
+                          <Button size="sm" variant="ghost" onClick={() => cancel(t)} title={t.repaymentOfId ? 'Cancelar saldo pendiente' : 'Cancelar'}>
+                            <Ban className="h-4 w-4 text-rose-500" />
+                          </Button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 );
@@ -854,7 +923,8 @@ function TransfersTab() {
       )}
       </Card>
       <TransferFormModal open={creating} onClose={() => setCreating(false)} />
-      <ExecuteTransferModal open={Boolean(executing)} onClose={() => setExecuting(null)} transfer={executing} />
+      <ExecuteTransferModal open={Boolean(executing)} onClose={() => setExecuting(null)} transfer={executing} partial={executing?.partial} />
+      <LoanRepaymentModal open={Boolean(programming)} onClose={() => setProgramming(null)} loan={programming} />
       <InternalTransferModal open={creatingInternal} onClose={() => setCreatingInternal(false)} />
     </div>
   );

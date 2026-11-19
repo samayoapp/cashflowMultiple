@@ -2,13 +2,13 @@
 
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import { Trash2, Undo2 } from 'lucide-react';
-import type { AccountDto, EntityDto, RuleDto } from '@/lib/server/dto';
+import type { AccountDto, EntityDto, RuleDto, TransferDto } from '@/lib/server/dto';
 import { api, emitDataChanged, useApi } from '@/lib/client/api';
 import { centsToDecimalString, formatMoney, toCents, type Cents } from '@/lib/money';
 import { addDays, formatShortDate } from '@/lib/dates';
 import { dueDateFor, nextDayOnOrAfter, statementCloseFor } from '@/lib/projection/card-cycle';
 import { useApp } from './AppContext';
-import { Button, ErrorBox, Field, Modal, Toggle, useToast } from './ui';
+import { Button, cn, ErrorBox, Field, Modal, Toggle, useToast } from './ui';
 import { CardImpactPreview, INSTALLMENT_OPTIONS, isCard, liquidAccounts } from './cards';
 
 const CURRENCIES = ['HNL', 'USD', 'EUR'];
@@ -1208,6 +1208,10 @@ export function TransferFormModal({ open, onClose }: { open: boolean; onClose: (
   const [amountTo, setAmountTo] = useState('');
   const [date, setDate] = useState(app.today);
   const [description, setDescription] = useState('');
+  const [repayDate, setRepayDate] = useState(addDays(app.today, 30));
+  const [repayTouched, setRepayTouched] = useState(false);
+  const [interest, setInterest] = useState('0');
+  const isLoan = kind === 'LOAN';
 
   useEffect(() => {
     if (!open) return;
@@ -1218,7 +1222,16 @@ export function TransferFormModal({ open, onClose }: { open: boolean; onClose: (
     setAmountTo('');
     setDate(app.today);
     setDescription('');
+    setRepayDate(addDays(app.today, 30));
+    setRepayTouched(false);
+    setInterest('0');
   }, [open, defaultEntity, app.today, setError]);
+
+  // La devolución sigue a la fecha de entrega mientras no se elija a mano
+  function onDate(v: string) {
+    setDate(v);
+    if (!repayTouched && v) setRepayDate(addDays(v, 30));
+  }
 
   const fromCur = app.entityById.get(fromEntityId)?.currency;
   const toCur = app.entityById.get(toEntityId)?.currency;
@@ -1229,12 +1242,24 @@ export function TransferFormModal({ open, onClose }: { open: boolean; onClose: (
     const a = parseMoneyInput(amountFrom);
     const b = differentCurrency ? parseMoneyInput(amountTo) : a;
     if (!a || !b || Number(a) <= 0 || Number(b) <= 0) return setError('Monto inválido');
+    const i = isLoan ? parseMoneyInput(interest || '0') : '0';
+    if (i === null || Number(i) < 0) return setError('Interés inválido');
+    if (isLoan && repayDate < date) return setError('La devolución no puede ser antes de la entrega');
     const ok = await run(
       () =>
         api('/api/transfers', {
-          body: { kind, fromEntityId, toEntityId, amountFrom: a, amountTo: b, expectedDate: date, description: description || null },
+          body: {
+            kind,
+            fromEntityId,
+            toEntityId,
+            amountFrom: a,
+            amountTo: b,
+            expectedDate: date,
+            description: description || null,
+            ...(isLoan ? { repaymentDate: repayDate, interest: i } : {}),
+          },
         }),
-      'Transferencia planificada',
+      isLoan ? 'Préstamo y devolución programados' : 'Transferencia planificada',
     );
     if (ok) onClose();
   }
@@ -1268,20 +1293,39 @@ export function TransferFormModal({ open, onClose }: { open: boolean; onClose: (
             </Field>
           ) : (
             <Field label="Fecha esperada">
-              <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
+              <input className="input" type="date" value={date} onChange={(e) => onDate(e.target.value)} required />
             </Field>
           )}
         </div>
         {differentCurrency && (
           <Field label="Fecha esperada">
-            <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
+            <input className="input" type="date" value={date} onChange={(e) => onDate(e.target.value)} required />
           </Field>
         )}
         <Field label="Descripción (opcional)">
           <input className="input" value={description} onChange={(e) => setDescription(e.target.value)} />
         </Field>
+        {isLoan && (
+          <LoanTermFields
+            base={date}
+            dueDate={repayDate}
+            setDueDate={(v) => {
+              setRepayDate(v);
+              setRepayTouched(true);
+            }}
+            interest={interest}
+            setInterest={setInterest}
+            currency={fromCur ?? ''}
+            principal={(() => {
+              const c = parseMoneyInput(amountFrom);
+              return c === null ? null : toCents(c);
+            })()}
+          />
+        )}
         <p className="text-xs text-slate-500">
-          Se reflejará como salida en el origen y entrada en el destino. En la vista consolidada se netea automáticamente.
+          {isLoan
+            ? 'La entrega sale del origen y entra al destino; la devolución queda como CxC en quien presta y CxP en quien recibe, y se salda con abonos. En la vista consolidada se netea.'
+            : 'Se reflejará como salida en el origen y entrada en el destino. En la vista consolidada se netea automáticamente.'}
         </p>
         <div className="flex justify-end gap-2 pt-2">
           <Button type="button" onClick={onClose}>
@@ -1296,29 +1340,55 @@ export function TransferFormModal({ open, onClose }: { open: boolean; onClose: (
   );
 }
 
+/**
+ * Ejecuta una transferencia entre unidades (todo lo pendiente) o, en devoluciones de préstamo,
+ * registra un ABONO. Lee el saldo pendiente de cada lado desde /api/transfers/[id].
+ */
 export function ExecuteTransferModal({
   open,
   onClose,
   transfer,
+  partial = false,
 }: {
   open: boolean;
   onClose: () => void;
-  transfer: { id: string; fromEntityId: string; toEntityId: string; amountFrom: Cents; amountTo: Cents } | null;
+  transfer: { id: string } | null;
+  /** Abrir directamente en modo abono (solo devoluciones de préstamo). */
+  partial?: boolean;
 }) {
   const app = useApp();
   const { loading, error, run, setError } = useSubmit();
-  const fromAccounts = useApi<AccountDto[]>(open && transfer ? `/api/accounts?ctx=${transfer.fromEntityId}` : null);
-  const toAccounts = useApi<AccountDto[]>(open && transfer ? `/api/accounts?ctx=${transfer.toEntityId}` : null);
+  const detail = useApi<TransferDto>(open && transfer ? `/api/transfers/${transfer.id}` : null);
+  const t = detail.data?.id === transfer?.id ? detail.data : undefined;
+  const fromAccounts = useApi<AccountDto[]>(open && t ? `/api/accounts?ctx=${t.fromEntityId}` : null);
+  const toAccounts = useApi<AccountDto[]>(open && t ? `/api/accounts?ctx=${t.toEntityId}` : null);
   const [fromAccountId, setFromAcc] = useState('');
   const [toAccountId, setToAcc] = useState('');
   const [date, setDate] = useState(app.today);
+  const [amount, setAmount] = useState('');
+  const [amountTo, setAmountTo] = useState('');
+  const [amountToTouched, setAmountToTouched] = useState(false);
+
+  const isRepayment = Boolean(t?.repaymentOfId);
+  const abono = isRepayment && partial;
+  const from = t ? app.entityById.get(t.fromEntityId) : undefined;
+  const to = t ? app.entityById.get(t.toEntityId) : undefined;
+  const fromCur = from?.currency ?? 'HNL';
+  const toCur = to?.currency ?? 'HNL';
+  const differentCurrency = fromCur !== toCur;
 
   useEffect(() => {
-    if (open) {
-      setError(null);
-      setDate(app.today);
-    }
+    if (!open) return;
+    setError(null);
+    setDate(app.today);
+    setAmountToTouched(false);
   }, [open, app.today, setError]);
+  useEffect(() => {
+    if (open && t) {
+      setAmount(centsInput(t.remainingFrom));
+      setAmountTo(centsInput(t.remainingTo));
+    }
+  }, [open, t]);
   useEffect(() => {
     const a = liquidAccounts(fromAccounts.data);
     if (a.length && !a.some((x) => x.id === fromAccountId)) setFromAcc(a[0].id);
@@ -1328,50 +1398,225 @@ export function ExecuteTransferModal({
     if (a.length && !a.some((x) => x.id === toAccountId)) setToAcc(a[0].id);
   }, [toAccounts.data, toAccountId]);
 
+  // Con monedas distintas, lo recibido se propone en proporción al saldo pendiente
+  function onAmount(v: string) {
+    setAmount(v);
+    if (!t || !differentCurrency || amountToTouched) return;
+    const c = parseMoneyInput(v);
+    if (c !== null && t.remainingFrom > 0) setAmountTo(centsInput(Math.round((toCents(c) * t.remainingTo) / t.remainingFrom)));
+  }
+
   if (!transfer) return null;
-  const from = app.entityById.get(transfer.fromEntityId);
-  const to = app.entityById.get(transfer.toEntityId);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+    if (!t) return;
+    let body: Record<string, unknown> = { action: 'execute', fromAccountId, toAccountId, date };
+    if (abono) {
+      const a = parseMoneyInput(amount);
+      if (a === null || toCents(a) <= 0) return setError('Monto inválido');
+      if (toCents(a) > t.remainingFrom) return setError('El abono supera el saldo pendiente');
+      const b = differentCurrency ? parseMoneyInput(amountTo) : null;
+      if (differentCurrency && (b === null || toCents(b) <= 0)) return setError('Monto recibido inválido');
+      body = { action: 'pay', fromAccountId, toAccountId, date, amountFrom: a, ...(b ? { amountTo: b } : {}) };
+    }
     const ok = await run(
-      () => api(`/api/transfers/${transfer!.id}`, { body: { action: 'execute', fromAccountId, toAccountId, date } }),
-      'Transferencia ejecutada',
+      () => api(`/api/transfers/${t.id}`, { body }),
+      abono ? 'Abono registrado' : isRepayment ? 'Préstamo saldado' : 'Transferencia ejecutada',
+    );
+    if (ok) onClose();
+  }
+
+  const title = abono ? 'Abono a devolución de préstamo' : isRepayment ? 'Saldar devolución de préstamo' : 'Ejecutar transferencia';
+  return (
+    <Modal open={open} onClose={onClose} title={title}>
+      <form onSubmit={submit} className="space-y-3">
+        {error && <ErrorBox message={error} />}
+        {detail.error && <ErrorBox message={detail.error} />}
+        {!t ? (
+          <p className="text-sm text-slate-500">Cargando…</p>
+        ) : (
+          <>
+            {isRepayment && (
+              <div className="rounded-lg bg-slate-50 p-3 text-sm dark:bg-slate-800/40">
+                <p>
+                  {from?.name} le devuelve a {to?.name}
+                </p>
+                <p className="mt-1 text-slate-500">
+                  Total {formatMoney(t.amountTo, toCur)}
+                  {t.interest > 0 && ` (incluye interés ${formatMoney(t.interest, toCur)})`} · Abonado {formatMoney(t.paidTo, toCur)} ·{' '}
+                  <strong className="text-slate-900 dark:text-white">Pendiente {formatMoney(t.remainingTo, toCur)}</strong>
+                </p>
+              </div>
+            )}
+            <Field label={`Sale de ${from?.name ?? ''}${abono ? '' : ` (${formatMoney(t.remainingFrom, fromCur)})`}`}>
+              <select className="input" value={fromAccountId} onChange={(e) => setFromAcc(e.target.value)} required>
+                {liquidAccounts(fromAccounts.data).map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name} · {formatMoney(a.balance, fromCur)}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label={`Entra a ${to?.name ?? ''}${abono ? '' : ` (${formatMoney(t.remainingTo, toCur)})`}`}>
+              <select className="input" value={toAccountId} onChange={(e) => setToAcc(e.target.value)} required>
+                {liquidAccounts(toAccounts.data).map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <div className="grid grid-cols-2 gap-3">
+              {abono && (
+                <Field label={`Monto del abono (${fromCur})`}>
+                  <input className="input text-right" inputMode="decimal" value={amount} onChange={(e) => onAmount(e.target.value)} required />
+                </Field>
+              )}
+              {abono && differentCurrency && (
+                <Field label={`Recibe (${toCur})`}>
+                  <input
+                    className="input text-right"
+                    inputMode="decimal"
+                    value={amountTo}
+                    onChange={(e) => {
+                      setAmountTo(e.target.value);
+                      setAmountToTouched(true);
+                    }}
+                    required
+                  />
+                </Field>
+              )}
+              <Field label="Fecha real">
+                <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
+              </Field>
+            </div>
+          </>
+        )}
+        <div className="flex justify-end gap-2 pt-2">
+          <Button type="button" onClick={onClose}>
+            Cancelar
+          </Button>
+          <Button type="submit" variant="primary" loading={loading} disabled={!t || !fromAccountId || !toAccountId}>
+            {abono ? 'Registrar abono' : isRepayment ? 'Saldar' : 'Ejecutar'}
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+/** Atajos de plazo para la devolución de un préstamo (días a partir de la entrega). */
+const LOAN_TERMS = [30, 60, 90, 180];
+
+function LoanTermFields({
+  base,
+  dueDate,
+  setDueDate,
+  interest,
+  setInterest,
+  currency,
+  principal,
+}: {
+  base: string;
+  dueDate: string;
+  setDueDate: (v: string) => void;
+  interest: string;
+  setInterest: (v: string) => void;
+  currency: string;
+  principal: Cents | null;
+}) {
+  const i = parseMoneyInput(interest || '0');
+  const total = principal !== null && i !== null ? principal + toCents(i) : null;
+  return (
+    <div className="space-y-3 rounded-lg border border-slate-200 p-3 dark:border-slate-700">
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Fecha de devolución" hint="Queda como CxC en quien presta y CxP en quien recibe">
+          <input className="input" type="date" value={dueDate} min={base} onChange={(e) => setDueDate(e.target.value)} required />
+        </Field>
+        <Field label={`Interés total (${currency})`} hint="Opcional; 0 = sin interés">
+          <input className="input text-right" inputMode="decimal" value={interest} onChange={(e) => setInterest(e.target.value)} />
+        </Field>
+      </div>
+      <div className="flex flex-wrap items-center gap-1.5 text-xs">
+        <span className="text-slate-500">Plazo:</span>
+        {LOAN_TERMS.map((d) => (
+          <button
+            key={d}
+            type="button"
+            onClick={() => setDueDate(addDays(base, d))}
+            className={cn(
+              'rounded-md border px-2 py-0.5',
+              dueDate === addDays(base, d)
+                ? 'border-slate-800 bg-slate-800 text-white dark:border-slate-200 dark:bg-slate-200 dark:text-slate-900'
+                : 'border-slate-200 text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800',
+            )}
+          >
+            {d} días
+          </button>
+        ))}
+      </div>
+      {total !== null && (
+        <p className="text-xs text-slate-500">
+          A devolver: <strong className="text-slate-900 dark:text-white">{formatMoney(total, currency)}</strong> en uno o varios abonos hasta saldarlo.
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** Programa la devolución de un préstamo ya registrado (los anteriores a esta función). */
+export function LoanRepaymentModal({ open, onClose, loan }: { open: boolean; onClose: () => void; loan: TransferDto | null }) {
+  const app = useApp();
+  const { loading, error, run, setError } = useSubmit();
+  const base = loan ? (loan.executedDate ?? loan.expectedDate) : app.today;
+  const [dueDate, setDueDate] = useState(addDays(app.today, 30));
+  const [interest, setInterest] = useState('0');
+
+  useEffect(() => {
+    if (!open || !loan) return;
+    setError(null);
+    setDueDate(addDays(loan.executedDate ?? loan.expectedDate, 30));
+    setInterest('0');
+  }, [open, loan, setError]);
+
+  if (!loan) return null;
+  const lender = app.entityById.get(loan.fromEntityId);
+  const borrower = app.entityById.get(loan.toEntityId);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    const i = parseMoneyInput(interest || '0');
+    if (i === null || toCents(i) < 0) return setError('Interés inválido');
+    const ok = await run(
+      () => api(`/api/transfers/${loan!.id}`, { body: { action: 'repayment', dueDate, interest: i } }),
+      'Devolución programada',
     );
     if (ok) onClose();
   }
 
   return (
-    <Modal open={open} onClose={onClose} title="Ejecutar transferencia">
+    <Modal open={open} onClose={onClose} title="Programar devolución del préstamo">
       <form onSubmit={submit} className="space-y-3">
         {error && <ErrorBox message={error} />}
-        <Field label={`Sale de ${from?.name ?? ''} (${formatMoney(transfer.amountFrom, from?.currency ?? 'HNL')})`}>
-          <select className="input" value={fromAccountId} onChange={(e) => setFromAcc(e.target.value)} required>
-            {liquidAccounts(fromAccounts.data).map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.name}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <Field label={`Entra a ${to?.name ?? ''} (${formatMoney(transfer.amountTo, to?.currency ?? 'HNL')})`}>
-          <select className="input" value={toAccountId} onChange={(e) => setToAcc(e.target.value)} required>
-            {liquidAccounts(toAccounts.data).map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.name}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <Field label="Fecha real">
-          <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
-        </Field>
+        <p className="text-sm text-slate-600 dark:text-slate-400">
+          {lender?.name} prestó {formatMoney(loan.amountFrom, lender?.currency ?? 'HNL')} a {borrower?.name}.
+        </p>
+        <LoanTermFields
+          base={base}
+          dueDate={dueDate}
+          setDueDate={setDueDate}
+          interest={interest}
+          setInterest={setInterest}
+          currency={lender?.currency ?? 'HNL'}
+          principal={loan.amountFrom}
+        />
         <div className="flex justify-end gap-2 pt-2">
           <Button type="button" onClick={onClose}>
             Cancelar
           </Button>
-          <Button type="submit" variant="primary" loading={loading} disabled={!fromAccountId || !toAccountId}>
-            Ejecutar
+          <Button type="submit" variant="primary" loading={loading}>
+            Programar devolución
           </Button>
         </div>
       </form>

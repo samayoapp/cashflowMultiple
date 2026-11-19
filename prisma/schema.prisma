@@ -195,27 +195,27 @@ model Account {
 }
 
 model CashMovement {
-  id              String               @id @default(uuid())
-  entityId        String
-  accountId       String
-  type            MovementType
-  amount          Decimal              @db.Decimal(18, 2) // con signo: + entra, - sale
-  currency        String? // NULL = moneda de la entidad (solo tarjetas usan otra)
-  date            DateTime             @db.Date
-  description     String?
-  transferId      String?
+  id                String               @id @default(uuid())
+  entityId          String
+  accountId         String
+  type              MovementType
+  amount            Decimal              @db.Decimal(18, 2) // con signo: + entra, - sale
+  currency          String? // NULL = moneda de la entidad (solo tarjetas usan otra)
+  date              DateTime             @db.Date
+  description       String?
+  transferId        String?
   /// Transferencia entre cuentas de la misma entidad
   accountTransferId String?
-  createdById     String?
-  createdAt       DateTime             @default(now())
-  entity          Entity               @relation(fields: [entityId], references: [id], onDelete: Restrict)
-  account         Account              @relation(fields: [accountId], references: [id], onDelete: Restrict)
-  transfer        InterEntityTransfer? @relation(fields: [transferId], references: [id], onDelete: SetNull)
-  accountTransfer AccountTransfer?     @relation(fields: [accountTransferId], references: [id], onDelete: SetNull)
-  payment         Payment?
-  cardCharge      CardCharge?
-  cardPaymentBank CardPayment?         @relation("CardPaymentBankMovement")
-  cardPaymentCard CardPayment?         @relation("CardPaymentCardMovement")
+  createdById       String?
+  createdAt         DateTime             @default(now())
+  entity            Entity               @relation(fields: [entityId], references: [id], onDelete: Restrict)
+  account           Account              @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  transfer          InterEntityTransfer? @relation(fields: [transferId], references: [id], onDelete: SetNull)
+  accountTransfer   AccountTransfer?     @relation(fields: [accountTransferId], references: [id], onDelete: SetNull)
+  payment           Payment?
+  cardCharge        CardCharge?
+  cardPaymentBank   CardPayment?         @relation("CardPaymentBankMovement")
+  cardPaymentCard   CardPayment?         @relation("CardPaymentCardMovement")
 
   @@index([entityId, date])
   @@index([accountId])
@@ -329,25 +329,31 @@ model RecurringRule {
 }
 
 model InterEntityTransfer {
-  id            String         @id @default(uuid())
-  kind          TransferKind   @default(TRANSFER)
-  status        TransferStatus @default(PLANNED)
-  fromEntityId  String
-  toEntityId    String
-  fromAccountId String?
-  toAccountId   String?
-  amountFrom    Decimal        @db.Decimal(18, 2)
-  amountTo      Decimal        @db.Decimal(18, 2)
-  expectedDate  DateTime       @db.Date
-  executedDate  DateTime?      @db.Date
-  description   String?
-  createdById   String?
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
-  fromEntity    Entity         @relation("TransferFrom", fields: [fromEntityId], references: [id], onDelete: Restrict)
-  toEntity      Entity         @relation("TransferTo", fields: [toEntityId], references: [id], onDelete: Restrict)
-  obligations   Obligation[]
-  movements     CashMovement[]
+  id             String               @id @default(uuid())
+  kind           TransferKind         @default(TRANSFER)
+  status         TransferStatus       @default(PLANNED)
+  fromEntityId   String
+  toEntityId     String
+  fromAccountId  String?
+  toAccountId    String?
+  amountFrom     Decimal              @db.Decimal(18, 2)
+  amountTo       Decimal              @db.Decimal(18, 2)
+  expectedDate   DateTime             @db.Date
+  executedDate   DateTime?            @db.Date
+  description    String?
+  /// Esta transferencia es la DEVOLUCIÓN (por abonos) del préstamo indicado
+  repaymentOfId  String?              @unique
+  /// Interés incluido en la devolución, en la moneda de quien prestó (0 = sin interés)
+  interestAmount Decimal              @default(0) @db.Decimal(18, 2)
+  createdById    String?
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+  fromEntity     Entity               @relation("TransferFrom", fields: [fromEntityId], references: [id], onDelete: Restrict)
+  toEntity       Entity               @relation("TransferTo", fields: [toEntityId], references: [id], onDelete: Restrict)
+  repaymentOf    InterEntityTransfer? @relation("LoanRepayment", fields: [repaymentOfId], references: [id], onDelete: SetNull)
+  repayment      InterEntityTransfer? @relation("LoanRepayment")
+  obligations    Obligation[]
+  movements      CashMovement[]
 
   @@index([fromEntityId])
   @@index([toEntityId])

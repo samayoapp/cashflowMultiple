@@ -16,7 +16,7 @@ export const dynamic = 'force-dynamic';
 
 /**
  * Lista CxC/CxP del contexto.
- * ?direction=IN|OUT  ?status=open|closed|all  ?transfers=include|only|exclude  ?q=texto
+ * ?direction=IN|OUT  ?status=open|closed|all  ?transfers=include|only|exclude|loans  ?q=texto
  * ?from=YYYY-MM-DD&to=YYYY-MM-DD  período por fecha de vencimiento (ambos opcionales)
  * ?order=asc|desc  por fecha esperada (default asc)   ?limit=N (default 1000, máx. 5000)
  */
@@ -43,7 +43,14 @@ export const GET = route(async (req) => {
         ? { status: { in: ['SETTLED', 'CANCELLED'] } }
         : {}),
     ...(from || to ? { dueDate: { ...(from ? { gte: dbDate(from) } : {}), ...(to ? { lte: dbDate(to) } : {}) } } : {}),
-    ...(transfers === 'exclude' ? { transferId: null } : transfers === 'only' ? { transferId: { not: null } } : {}),
+    ...(transfers === 'exclude'
+      ? { transferId: null }
+      : transfers === 'only'
+        ? { transferId: { not: null } }
+        : transfers === 'loans'
+          ? // Partidas normales + devoluciones de préstamos entre unidades (se cobran/pagan por abonos)
+            { OR: [{ transferId: null }, { transfer: { repaymentOfId: { not: null } } }] }
+          : {}),
     ...(q
       ? {
           OR: [

@@ -47,6 +47,7 @@ export const obligationInclude = {
   payments: { orderBy: { date: 'asc' as const }, include: { account: { select: { name: true, type: true } } } },
   counterparty: { select: { id: true, name: true } },
   category: { select: { id: true, name: true } },
+  transfer: { select: { id: true, fromEntityId: true, toEntityId: true, repaymentOfId: true, status: true } },
 } satisfies Prisma.ObligationInclude;
 
 type ObligationWith = Prisma.ObligationGetPayload<{ include: typeof obligationInclude }>;
@@ -72,6 +73,10 @@ export function obligationDto(o: ObligationWith) {
     recurrenceId: o.recurrenceId,
     occurrenceDate: isoOrNull(o.occurrenceDate),
     transferId: o.transferId,
+    /** Devolución de préstamo entre unidades (se opera con abonos de transferencia). */
+    loanRepayment: o.transfer?.repaymentOfId
+      ? { transferId: o.transfer.id, fromEntityId: o.transfer.fromEntityId, toEntityId: o.transfer.toEntityId }
+      : null,
     notes: o.notes,
     payments: o.payments.map((p) => ({
       id: p.id,
@@ -123,3 +128,43 @@ export interface UpcomingOccurrenceDto {
   counterparty: RuleDto['counterparty'];
   category: RuleDto['category'];
 }
+
+export const transferInclude = {
+  obligations: { select: { direction: true, amount: true, payments: { select: { amount: true } } } },
+  repayment: { select: { id: true, status: true } },
+} satisfies Prisma.InterEntityTransferInclude;
+
+type TransferWith = Prisma.InterEntityTransferGetPayload<{ include: typeof transferInclude }>;
+
+/** Transferencia entre unidades con lo abonado/pendiente de cada lado (préstamos y devoluciones). */
+export function transferDto(t: TransferWith) {
+  const side = (dir: 'OUT' | 'IN') => {
+    const o = t.obligations.find((x) => x.direction === dir);
+    const paid = o ? o.payments.reduce((s, p) => s + cents(p.amount), 0) : 0;
+    return { paid, remaining: o ? Math.max(cents(o.amount) - paid, 0) : 0 };
+  };
+  const out = side('OUT');
+  const inn = side('IN');
+  return {
+    id: t.id,
+    kind: t.kind,
+    status: t.status,
+    fromEntityId: t.fromEntityId,
+    toEntityId: t.toEntityId,
+    amountFrom: cents(t.amountFrom),
+    amountTo: cents(t.amountTo),
+    expectedDate: isoOf(t.expectedDate),
+    executedDate: isoOrNull(t.executedDate),
+    description: t.description,
+    /** Es la devolución del préstamo indicado. */
+    repaymentOfId: t.repaymentOfId,
+    interest: cents(t.interestAmount),
+    /** Préstamo: su devolución (si ya se programó). */
+    repayment: t.repayment,
+    paidFrom: out.paid,
+    remainingFrom: out.remaining,
+    paidTo: inn.paid,
+    remainingTo: inn.remaining,
+  };
+}
+export type TransferDto = ReturnType<typeof transferDto>;

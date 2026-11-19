@@ -6,7 +6,7 @@ import type { ProjectedItem } from '@/lib/projection/types';
 import type { ObligationDto } from '@/lib/server/dto';
 import { api, emitDataChanged } from '@/lib/client/api';
 import { Button, useToast } from './ui';
-import { PaymentModal, RescheduleModal } from './forms';
+import { ExecuteTransferModal, PaymentModal, RescheduleModal } from './forms';
 import { CardPaymentModal, type CardPaymentTarget } from './cards';
 
 /**
@@ -19,6 +19,7 @@ export function useItemActions() {
   const [payFull, setPayFull] = useState(false);
   const [moveTarget, setMoveTarget] = useState<ObligationDto | null>(null);
   const [cardTarget, setCardTarget] = useState<CardPaymentTarget | null>(null);
+  const [transferTarget, setTransferTarget] = useState<{ id: string; partial: boolean } | null>(null);
 
   async function ensureObligation(item: ProjectedItem): Promise<ObligationDto | null> {
     try {
@@ -36,7 +37,8 @@ export function useItemActions() {
       return;
     }
     if (item.transferId) {
-      toast('Las transferencias se ejecutan desde CxC / CxP → Transferencias', 'error');
+      // Transferencia entre unidades: se ejecuta completa; si es devolución de préstamo, admite abonos
+      setTransferTarget({ id: item.transferId, partial: !full });
       return;
     }
     if (item.isHypothetical) {
@@ -66,6 +68,12 @@ export function useItemActions() {
       <PaymentModal open={Boolean(payTarget)} onClose={() => setPayTarget(null)} target={payTarget} full={payFull} />
       <RescheduleModal open={Boolean(moveTarget)} onClose={() => setMoveTarget(null)} target={moveTarget} />
       <CardPaymentModal open={Boolean(cardTarget)} onClose={() => setCardTarget(null)} target={cardTarget} />
+      <ExecuteTransferModal
+        open={Boolean(transferTarget)}
+        onClose={() => setTransferTarget(null)}
+        transfer={transferTarget}
+        partial={transferTarget?.partial}
+      />
     </>
   );
 

@@ -4,9 +4,10 @@ import { badRequest, conflict, notFound } from './api';
 import { cents, dbDate, dec, isoOf } from './serialize';
 import { expandRule } from '@/lib/projection/recurrence';
 import type { ISODate } from '@/lib/dates';
-import type { Cents } from '@/lib/money';
+import { centsToDecimalString, type Cents } from '@/lib/money';
 import { insertCardCharge } from './cards';
 import { assertOnOrAfterOpening } from './account-opening';
+import { repaymentTotals, splitTransferPayment } from '@/lib/projection/loans';
 
 type Tx = Prisma.TransactionClient;
 
@@ -175,6 +176,8 @@ interface TransferArgs {
   userId: string;
   /** Categoría de la partida de salida (p. ej. gasto reembolsado a otra entidad). */
   outCategoryId?: string | null;
+  /** Solo préstamos: programa su devolución (CxC en quien presta, CxP en quien recibe). */
+  repayment?: { dueDate: ISODate; interest: Cents } | null;
 }
 
 /**
@@ -237,22 +240,117 @@ export async function createTransferTx(tx: Tx, args: TransferArgs) {
       },
     ],
   });
+  if (args.repayment) {
+    if (args.kind !== 'LOAN') throw badRequest('Solo los préstamos tienen devolución');
+    await createLoanRepaymentTx(tx, t.id, { ...args.repayment, userId: args.userId });
+  }
   return t;
 }
 
-/** Ejecuta una transferencia: mueve caja real en ambas entidades y cierra sus partidas. */
-export async function executeTransfer(args: {
+/**
+ * Programa la devolución de un préstamo entre unidades: una transferencia en sentido contrario
+ * (quien recibió → quien prestó) por capital + interés, que se paga con abonos hasta cerrarse.
+ * Queda como CxP en quien recibió y CxC en quien prestó (en el consolidado se netea).
+ */
+export async function createLoanRepaymentTx(
+  tx: Tx,
+  loanId: string,
+  args: { dueDate: ISODate; interest: Cents; userId: string },
+) {
+  const loan = await tx.interEntityTransfer.findUnique({
+    where: { id: loanId },
+    include: { repayment: { select: { id: true } }, fromEntity: true, toEntity: true },
+  });
+  if (!loan) throw notFound('Préstamo no encontrado');
+  if (loan.kind !== 'LOAN') throw badRequest('Solo los préstamos tienen devolución');
+  if (loan.repaymentOfId) throw badRequest('Esta transferencia ya es una devolución');
+  if (loan.status === 'CANCELLED') throw conflict('El préstamo está cancelado');
+  if (loan.repayment) throw conflict('Este préstamo ya tiene su devolución programada');
+  if (args.interest < 0) throw badRequest('El interés no puede ser negativo');
+  const lentOn = isoOf(loan.executedDate ?? loan.expectedDate);
+  if (args.dueDate < lentOn) throw badRequest(`La devolución no puede ser antes del préstamo (${lentOn})`);
+
+  const lender = loan.fromEntity;
+  const borrower = loan.toEntity;
+  const principalLender = cents(loan.amountFrom);
+  // El interés se pacta en la moneda de quien presta; del lado de quien recibió se convierte a la tasa del préstamo
+  const { lender: totalLender, borrower: totalBorrower } = repaymentTotals(principalLender, cents(loan.amountTo), args.interest);
+  const notes = args.interest > 0 ? `Capital ${centsToDecimalString(principalLender)} + interés ${centsToDecimalString(args.interest)} (${lender.currency})` : null;
+
+  const r = await tx.interEntityTransfer.create({
+    data: {
+      kind: 'LOAN',
+      fromEntityId: borrower.id,
+      toEntityId: lender.id,
+      amountFrom: dec(totalBorrower),
+      amountTo: dec(totalLender),
+      expectedDate: dbDate(args.dueDate),
+      description: loan.description ? `Devolución: ${loan.description}` : 'Devolución de préstamo',
+      repaymentOfId: loan.id,
+      interestAmount: dec(args.interest),
+      createdById: args.userId,
+    },
+  });
+  await tx.obligation.createMany({
+    data: [
+      {
+        entityId: borrower.id,
+        direction: 'OUT',
+        description: `Devolución préstamo → ${lender.name}`,
+        amount: dec(totalBorrower),
+        dueDate: dbDate(args.dueDate),
+        expectedDate: dbDate(args.dueDate),
+        priority: 'FLEXIBLE',
+        transferId: r.id,
+        notes,
+        createdById: args.userId,
+      },
+      {
+        entityId: lender.id,
+        direction: 'IN',
+        description: `Devolución préstamo ← ${borrower.name}`,
+        amount: dec(totalLender),
+        dueDate: dbDate(args.dueDate),
+        expectedDate: dbDate(args.dueDate),
+        priority: 'FLEXIBLE',
+        transferId: r.id,
+        notes,
+        createdById: args.userId,
+      },
+    ],
+  });
+  return r;
+}
+
+/**
+ * Ejecuta una transferencia entre unidades: mueve caja real en ambas y abona sus partidas espejo.
+ * Sin montos se liquida el saldo pendiente completo. Con `amountFrom` se registra un ABONO
+ * (solo en devoluciones de préstamo); la transferencia se cierra cuando ambos lados quedan saldados.
+ */
+export async function payTransfer(args: {
   transferId: string;
   fromAccountId: string;
   toAccountId: string;
   date: ISODate;
+  /** Abono: lo que sale de la unidad origen (su moneda). */
+  amountFrom?: Cents;
+  /** Abono con monedas distintas: lo que entra al destino. Por defecto, proporcional. */
+  amountTo?: Cents;
   userId: string;
 }) {
   return prisma.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT id FROM "InterEntityTransfer" WHERE id = ${args.transferId} FOR UPDATE`;
-    const t = await tx.interEntityTransfer.findUnique({ where: { id: args.transferId } });
+    const t = await tx.interEntityTransfer.findUnique({
+      where: { id: args.transferId },
+      include: { repaymentOf: { select: { status: true } } },
+    });
     if (!t) throw notFound('Transferencia no encontrada');
     if (t.status !== 'PLANNED') throw conflict('La transferencia ya fue ejecutada o cancelada');
+    if (t.repaymentOf && t.repaymentOf.status !== 'EXECUTED') {
+      throw conflict('El préstamo todavía no se ha entregado: ejecútalo primero');
+    }
+    const partial = args.amountFrom !== undefined;
+    if (partial && !t.repaymentOfId) throw badRequest('Solo las devoluciones de préstamo aceptan abonos');
 
     const [fromAcc, toAcc] = await Promise.all([
       tx.account.findUnique({ where: { id: args.fromAccountId } }),
@@ -261,46 +359,59 @@ export async function executeTransfer(args: {
     if (!fromAcc || fromAcc.entityId !== t.fromEntityId) throw badRequest('Cuenta de origen inválida');
     if (!toAcc || toAcc.entityId !== t.toEntityId) throw badRequest('Cuenta de destino inválida');
     if (fromAcc.type === 'CREDIT_CARD' || toAcc.type === 'CREDIT_CARD') {
-      throw badRequest('Las transferencias entre unidades de negocio usan cuentas líquidas, no tarjetas');
+      throw badRequest('Las transferencias entre entidades usan cuentas líquidas, no tarjetas');
     }
+    if (fromAcc.archivedAt || toAcc.archivedAt) throw badRequest('No se puede usar una cuenta archivada');
     await assertOnOrAfterOpening(tx, fromAcc, args.date);
     await assertOnOrAfterOpening(tx, toAcc, args.date);
 
-    const obligations = await tx.obligation.findMany({ where: { transferId: t.id } });
-    const date = dbDate(args.date);
+    const obligations = await tx.obligation.findMany({
+      where: { transferId: t.id },
+      include: { payments: { select: { amount: true } } },
+    });
+    const out = obligations.find((o) => o.direction === 'OUT');
+    const inn = obligations.find((o) => o.direction === 'IN');
+    if (!out || !inn) throw conflict('La transferencia no tiene sus dos partidas');
+    const remainingOf = (o: typeof out) => cents(o.amount) - o.payments.reduce((sum, p) => sum + cents(p.amount), 0);
+    const remOut = remainingOf(out);
+    const remIn = remainingOf(inn);
 
-    for (const ob of obligations) {
-      const isOut = ob.direction === 'OUT';
-      const account = isOut ? fromAcc : toAcc;
-      const amount = isOut ? cents(t.amountFrom) : cents(t.amountTo);
+    let split: ReturnType<typeof splitTransferPayment>;
+    try {
+      split = splitTransferPayment(remOut, remIn, args.amountFrom, args.amountTo);
+    } catch (e) {
+      throw badRequest(e instanceof Error ? e.message : 'Abono inválido');
+    }
+    const { out: payOut, in: payIn, closes: closed } = split;
+
+    const date = dbDate(args.date);
+    for (const [ob, account, amount] of [
+      [out, fromAcc, payOut],
+      [inn, toAcc, payIn],
+    ] as const) {
       const mv = await tx.cashMovement.create({
         data: {
           entityId: ob.entityId,
           accountId: account.id,
           type: 'TRANSFER',
-          amount: dec(isOut ? -amount : amount),
+          amount: dec(ob.direction === 'OUT' ? -amount : amount),
           date,
-          description: ob.description,
+          description: partial ? `Abono: ${ob.description}` : ob.description,
           transferId: t.id,
           createdById: args.userId,
         },
       });
       await tx.payment.create({
-        data: {
-          obligationId: ob.id,
-          accountId: account.id,
-          amount: dec(amount),
-          date,
-          cashMovementId: mv.id,
-          createdById: args.userId,
-        },
+        data: { obligationId: ob.id, accountId: account.id, amount: dec(amount), date, cashMovementId: mv.id, createdById: args.userId },
       });
-      await tx.obligation.update({ where: { id: ob.id }, data: { status: 'SETTLED' } });
     }
+    await tx.obligation.updateMany({ where: { transferId: t.id }, data: { status: closed ? 'SETTLED' : 'PARTIAL' } });
 
     return tx.interEntityTransfer.update({
       where: { id: t.id },
-      data: { status: 'EXECUTED', executedDate: date, fromAccountId: fromAcc.id, toAccountId: toAcc.id },
+      data: closed
+        ? { status: 'EXECUTED', executedDate: date, fromAccountId: fromAcc.id, toAccountId: toAcc.id }
+        : { fromAccountId: fromAcc.id, toAccountId: toAcc.id },
     });
   });
 }
