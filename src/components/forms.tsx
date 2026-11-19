@@ -1,6 +1,7 @@
 'use client';
 
 import { Fragment, useEffect, useMemo, useState } from 'react';
+import { Trash2, Undo2 } from 'lucide-react';
 import type { AccountDto, EntityDto, RuleDto } from '@/lib/server/dto';
 import { api, emitDataChanged, useApi } from '@/lib/client/api';
 import { centsToDecimalString, formatMoney, toCents, type Cents } from '@/lib/money';
@@ -541,6 +542,8 @@ export interface ObligationLike {
   counterparty: { id: string; name: string } | null;
   notes: string | null;
   transferId: string | null;
+  recurrenceId?: string | null;
+  payments?: { id: string; amount: Cents; date: string; accountName: string; byCard?: boolean }[];
 }
 
 export function ObligationFormModal({
@@ -601,6 +604,35 @@ export function ObligationFormModal({
   }, [open, obligation, defaultEntity, app.today, direction, hypothetical, setError]);
 
   const isIn = (obligation?.direction ?? direction) === 'IN';
+  const toast = useToast();
+  const [undoing, setUndoing] = useState<string | null>(null);
+  const payments = obligation?.payments ?? [];
+  const canDelete = Boolean(obligation) && payments.length === 0 && !obligation?.transferId && !obligation?.recurrenceId;
+
+  async function undoPayment(p: { id: string; amount: Cents; date: string; accountName: string }) {
+    if (!obligation) return;
+    const cur = app.entityById.get(obligation.entityId)?.currency ?? 'HNL';
+    const what = isIn ? 'cobro' : 'pago';
+    if (!confirm(`¿Deshacer el ${what} de ${formatMoney(p.amount, cur)} del ${p.date} (${p.accountName})? Se quita también del saldo de la cuenta.`)) return;
+    setUndoing(p.id);
+    try {
+      await api(`/api/obligations/${obligation.id}/payments/${p.id}`, { method: 'DELETE' });
+      toast(`${isIn ? 'Cobro' : 'Pago'} deshecho`);
+      emitDataChanged();
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Error');
+    } finally {
+      setUndoing(null);
+    }
+  }
+
+  async function remove() {
+    if (!obligation) return;
+    if (!confirm(`¿Eliminar definitivamente "${obligation.description}"? No se puede deshacer.`)) return;
+    const ok = await run(() => api(`/api/obligations/${obligation.id}`, { method: 'DELETE' }), 'Partida eliminada');
+    if (ok) onClose();
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -748,7 +780,32 @@ export function ObligationFormModal({
             label={<span className="text-sm">Hipotética (solo visible en Modo Simulación)</span>}
           />
         )}
-        <div className="flex justify-end gap-2 pt-2">
+        {payments.length > 0 && (
+          <div className="rounded-lg border border-slate-200 p-3 dark:border-slate-700">
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">{isIn ? 'Cobros' : 'Pagos'} registrados</p>
+            <ul className="divide-y divide-slate-100 text-sm dark:divide-slate-800">
+              {payments.map((p) => (
+                <li key={p.id} className="flex items-center gap-2 py-1.5">
+                  <span className="tabular-nums">{p.date}</span>
+                  <span className="truncate text-slate-500">{p.byCard ? `💳 ${p.accountName}` : p.accountName}</span>
+                  <span className="ml-auto tabular-nums font-medium">{formatMoney(p.amount, app.entityById.get(obligation!.entityId)?.currency ?? 'HNL')}</span>
+                  {!p.byCard && (
+                    <Button type="button" size="sm" variant="ghost" title={`Deshacer este ${isIn ? 'cobro' : 'pago'}`} loading={undoing === p.id} onClick={() => undoPayment(p)}>
+                      <Undo2 className="h-4 w-4 text-rose-500" />
+                    </Button>
+                  )}
+                </li>
+              ))}
+            </ul>
+            <p className="mt-1 text-xs text-slate-500">Deshacer quita el movimiento de la cuenta y la partida vuelve a quedar pendiente.</p>
+          </div>
+        )}
+        <div className="flex items-center justify-end gap-2 pt-2">
+          {canDelete && (
+            <Button type="button" variant="ghost" className="mr-auto text-rose-600" onClick={remove}>
+              <Trash2 className="h-4 w-4" /> Eliminar
+            </Button>
+          )}
           <Button type="button" onClick={onClose}>
             Cancelar
           </Button>
@@ -961,6 +1018,18 @@ export function RescheduleModal({
 
 // ---------------------------------------------------------------- Recurrencia
 /** Alta y edición de recurrencias. Con `rule` edita (entidad y tipo no cambian). */
+/** Confirmación para eliminar una recurrencia completa (las fechas ya pagadas se conservan). */
+export async function confirmDeleteRecurrence(description: string): Promise<boolean> {
+  return confirm(
+    `¿Eliminar la recurrencia "${description}"?\n\nSe borran todas sus fechas futuras y las pendientes. ` +
+      'Las que ya tienen cobros/pagos se conservan como partidas normales. No se puede deshacer.',
+  );
+}
+
+export function recurrenceDeletedMsg(r: { deleted: number; kept: number }): string {
+  return `Recurrencia eliminada${r.kept ? ` · ${r.kept} fecha(s) con pagos se conservaron` : ''}`;
+}
+
 export function RecurrenceFormModal({
   open,
   onClose,
@@ -976,6 +1045,7 @@ export function RecurrenceFormModal({
   const editing = Boolean(rule);
   const defaultEntity = useDefaultEntityId();
   const { loading, error, run, setError } = useSubmit();
+  const toast = useToast();
   const [entityId, setEntityId] = useState(defaultEntity);
   const [direction, setDirection] = useState<'IN' | 'OUT'>('OUT');
   const [description, setDescription] = useState('');
@@ -1096,7 +1166,24 @@ export function RecurrenceFormModal({
             individualmente conservan sus datos.
           </p>
         )}
-        <div className="flex justify-end gap-2 pt-2">
+        <div className="flex items-center justify-end gap-2 pt-2">
+          {rule && (
+            <Button
+              type="button"
+              variant="ghost"
+              className="mr-auto text-rose-600"
+              onClick={async () => {
+                if (!(await confirmDeleteRecurrence(rule.description))) return;
+                const ok = await run(async () => {
+                  const r = await api<{ deleted: number; kept: number }>(`/api/recurrences/${rule.id}`, { method: 'DELETE' });
+                  toast(recurrenceDeletedMsg(r));
+                });
+                if (ok) onClose();
+              }}
+            >
+              <Trash2 className="h-4 w-4" /> Eliminar
+            </Button>
+          )}
           <Button type="button" onClick={onClose}>
             Cancelar
           </Button>

@@ -44,7 +44,7 @@ export function accountDto(a: Account, balance: number, balanceForeign = 0) {
 export type AccountDto = ReturnType<typeof accountDto>;
 
 export const obligationInclude = {
-  payments: { orderBy: { date: 'asc' as const }, include: { account: { select: { name: true } } } },
+  payments: { orderBy: { date: 'asc' as const }, include: { account: { select: { name: true, type: true } } } },
   counterparty: { select: { id: true, name: true } },
   category: { select: { id: true, name: true } },
 } satisfies Prisma.ObligationInclude;
@@ -79,6 +79,7 @@ export function obligationDto(o: ObligationWith) {
       date: isoOf(p.date),
       accountId: p.accountId,
       accountName: p.account.name,
+      byCard: p.account.type === 'CREDIT_CARD',
       note: p.note,
     })),
   };

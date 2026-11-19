@@ -423,3 +423,66 @@ export async function reconcileAccount(args: {
     return { adjusted: true, difference: diff };
   });
 }
+
+/**
+ * Elimina una partida sin abonos. Las transferencias se manejan desde su pantalla, y una ocurrencia
+ * de recurrencia activa se omite (cancela): si se borrara, la proyección la volvería a generar.
+ */
+export async function deleteObligation(id: string) {
+  return prisma.$transaction(async (tx) => {
+    const { ob, paid } = await lockObligation(tx, id);
+    if (ob.transferId) throw conflict('Es una transferencia entre entidades: anúlala desde Transferencias');
+    if (paid > 0 || ob.payments.length > 0) {
+      throw conflict('Tiene cobros/pagos registrados: deshazlos primero (botón Editar, en la lista de cobros/pagos registrados) y luego elimínala');
+    }
+    if (await tx.cardCharge.findUnique({ where: { obligationId: ob.id } })) {
+      throw conflict('Fue pagada con tarjeta: deshaz ese consumo antes de eliminarla');
+    }
+    if (ob.recurrenceId) {
+      const rule = await tx.recurringRule.findUnique({ where: { id: ob.recurrenceId }, select: { active: true } });
+      if (rule?.active) {
+        throw conflict('Es una fecha de una recurrencia: usa "Omitir" para quitar solo esta fecha, o elimina la recurrencia completa');
+      }
+    }
+    await tx.obligation.delete({ where: { id: ob.id } });
+  });
+}
+
+/** Deshace un cobro/pago: borra el abono y su movimiento de caja, y recalcula el estado de la partida. */
+export async function deletePayment(obligationId: string, paymentId: string) {
+  return prisma.$transaction(async (tx) => {
+    const { ob } = await lockObligation(tx, obligationId);
+    const p = await tx.payment.findUnique({ where: { id: paymentId }, include: { account: { select: { type: true } } } });
+    if (!p || p.obligationId !== ob.id) throw notFound('Abono no encontrado');
+    if (ob.transferId) throw conflict('Es una transferencia entre entidades: anúlala desde Transferencias');
+    if (p.account.type === 'CREDIT_CARD') {
+      throw conflict('Este pago se hizo con tarjeta (generó cuotas): no se puede deshacer desde aquí');
+    }
+    await tx.payment.delete({ where: { id: p.id } });
+    await tx.cashMovement.delete({ where: { id: p.cashMovementId } });
+    const agg = await tx.payment.aggregate({ where: { obligationId: ob.id }, _sum: { amount: true } });
+    const paid = cents(agg._sum.amount);
+    const status = ob.status === 'CANCELLED' ? 'CANCELLED' : paid === 0 ? 'OPEN' : paid >= cents(ob.amount) ? 'SETTLED' : 'PARTIAL';
+    await tx.obligation.update({ where: { id: ob.id }, data: { status } });
+  });
+}
+
+/**
+ * Elimina una recurrencia: borra sus ocurrencias sin abonos y conserva (como partidas puntuales)
+ * las que ya tienen cobros/pagos o un consumo de tarjeta.
+ */
+export async function deleteRecurrence(ruleId: string) {
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "RecurringRule" WHERE id = ${ruleId} FOR UPDATE`;
+    const occ = await tx.obligation.findMany({
+      where: { recurrenceId: ruleId },
+      select: { id: true, _count: { select: { payments: true } }, cardCharge: { select: { id: true } } },
+    });
+    const keep = occ.filter((o) => o._count.payments > 0 || o.cardCharge).map((o) => o.id);
+    const drop = occ.filter((o) => !keep.includes(o.id)).map((o) => o.id);
+    if (drop.length) await tx.obligation.deleteMany({ where: { id: { in: drop } } });
+    if (keep.length) await tx.obligation.updateMany({ where: { id: { in: keep } }, data: { recurrenceId: null, occurrenceDate: null } });
+    await tx.recurringRule.delete({ where: { id: ruleId } });
+    return { deleted: drop.length, kept: keep.length };
+  });
+}

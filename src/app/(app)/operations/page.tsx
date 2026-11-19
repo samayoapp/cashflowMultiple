@@ -9,6 +9,8 @@ import {
   ExecuteTransferModal,
   InternalTransferModal,
   ObligationFormModal,
+  confirmDeleteRecurrence,
+  recurrenceDeletedMsg,
   PaymentModal,
   RecurrenceFormModal,
   RescheduleModal,
@@ -222,12 +224,24 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
   }
 
   async function cancel(o: ObligationDto) {
-    const hypo = o.isHypothetical;
-    if (!confirm(hypo ? `¿Eliminar la partida hipotética "${o.description}"?` : `¿Cancelar "${o.description}"? Dejará de proyectarse.`)) return;
+    const msg = o.recurrenceId
+      ? `¿Omitir la fecha ${o.expectedDate} de "${o.description}"? Las demás fechas de la recurrencia no cambian.`
+      : `¿Cancelar "${o.description}"? Dejará de proyectarse y queda en el historial como cancelada.`;
+    if (!confirm(msg)) return;
     try {
-      if (hypo) await api(`/api/obligations/${o.id}`, { method: 'DELETE' });
-      else await api(`/api/obligations/${o.id}`, { method: 'PATCH', body: { status: 'CANCELLED' } });
-      toast(hypo ? 'Partida eliminada' : 'Partida cancelada');
+      await api(`/api/obligations/${o.id}`, { method: 'PATCH', body: { status: 'CANCELLED' } });
+      toast(o.recurrenceId ? 'Fecha omitida' : 'Partida cancelada');
+      emitDataChanged();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'Error', 'error');
+    }
+  }
+
+  async function remove(o: ObligationDto) {
+    if (!confirm(`¿Eliminar definitivamente "${o.description}"? No queda en el historial y no se puede deshacer.`)) return;
+    try {
+      await api(`/api/obligations/${o.id}`, { method: 'DELETE' });
+      toast('Partida eliminada');
       emitDataChanged();
     } catch (e) {
       toast(e instanceof Error ? e.message : 'Error', 'error');
@@ -490,9 +504,19 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
                             <Repeat className="h-4 w-4 text-sky-600" />
                           </Button>
                         )}
-                        {!closed && (
-                          <Button size="sm" variant="ghost" title={o.isHypothetical ? 'Eliminar' : 'Cancelar'} onClick={() => cancel(o)}>
-                            {o.isHypothetical ? <Trash2 className="h-4 w-4 text-rose-500" /> : <Ban className="h-4 w-4 text-rose-500" />}
+                        {!closed && !o.isHypothetical && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            title={o.recurrenceId ? 'Omitir esta fecha' : 'Cancelar (se conserva en el historial)'}
+                            onClick={() => cancel(o)}
+                          >
+                            {o.recurrenceId ? <SkipForward className="h-4 w-4 text-rose-500" /> : <Ban className="h-4 w-4 text-rose-500" />}
+                          </Button>
+                        )}
+                        {(o.isHypothetical || (o.payments.length === 0 && !o.recurrenceId)) && (
+                          <Button size="sm" variant="ghost" title="Eliminar definitivamente" onClick={() => remove(o)}>
+                            <Trash2 className="h-4 w-4 text-rose-500" />
                           </Button>
                         )}
                       </div>
@@ -526,6 +550,17 @@ function RulesTab() {
   const toast = useToast();
   const { data, error, loading } = useApi<RuleDto[]>(`/api/recurrences?ctx=${encodeURIComponent(app.ctx)}`);
   const [form, setForm] = useState<{ open: boolean; rule: RuleDto | null }>({ open: false, rule: null });
+
+  async function removeRule(r: RuleDto) {
+    if (!(await confirmDeleteRecurrence(r.description))) return;
+    try {
+      const res = await api<{ deleted: number; kept: number }>(`/api/recurrences/${r.id}`, { method: 'DELETE' });
+      toast(recurrenceDeletedMsg(res));
+      emitDataChanged();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'Error', 'error');
+    }
+  }
 
   async function toggle(r: RuleDto, active: boolean) {
     try {
@@ -594,6 +629,9 @@ function RulesTab() {
                     <td className="td text-right">
                       <Button size="sm" variant="ghost" title="Editar" onClick={() => setForm({ open: true, rule: r })}>
                         <Pencil className="h-4 w-4" />
+                      </Button>
+                      <Button size="sm" variant="ghost" title="Eliminar recurrencia" onClick={() => removeRule(r)}>
+                        <Trash2 className="h-4 w-4 text-rose-500" />
                       </Button>
                     </td>
                   </tr>

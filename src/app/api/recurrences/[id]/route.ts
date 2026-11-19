@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { prisma } from '@/lib/server/db';
 import { badRequest, notFound, ok, readJson, route } from '@/lib/server/api';
+import { deleteRecurrence } from '@/lib/server/services';
 import { requireUser } from '@/lib/server/auth';
 import { assertEntityAccess } from '@/lib/server/scope';
 import { dbDate, dec, isoOf } from '@/lib/server/serialize';
@@ -59,4 +60,16 @@ export const PATCH = route<{ params: { id: string } }>(async (req, { params }) =
     });
   });
   return ok(ruleDto(updated));
+});
+
+/**
+ * Elimina la recurrencia (p. ej. una duplicada por error). Sus ocurrencias sin abonos se borran;
+ * las que ya tienen cobros/pagos se conservan como partidas puntuales (son historia real).
+ */
+export const DELETE = route<{ params: { id: string } }>(async (_req, { params }) => {
+  const user = await requireUser();
+  const r = await prisma.recurringRule.findUnique({ where: { id: params.id } });
+  if (!r) throw notFound('Recurrencia no encontrada');
+  await assertEntityAccess(user, r.entityId);
+  return ok(await deleteRecurrence(r.id));
 });

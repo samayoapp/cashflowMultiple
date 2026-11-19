@@ -6,6 +6,7 @@ import { assertEntityAccess } from '@/lib/server/scope';
 import { obligationDto, obligationInclude } from '@/lib/server/dto';
 import { cents, dbDate, dec } from '@/lib/server/serialize';
 import { assertCategory, resolveCounterparty } from '@/lib/server/catalog';
+import { deleteObligation } from '@/lib/server/services';
 import { id, isoDate, optionalText, positiveMoney, priority, shortText } from '@/lib/validation';
 
 export const dynamic = 'force-dynamic';
@@ -106,12 +107,15 @@ export const PATCH = route<{ params: { id: string } }>(async (req, { params }) =
   return ok(obligationDto(updated));
 });
 
-/** Solo las partidas hipotéticas (What-If) se eliminan; las reales se cancelan. */
+/**
+ * Elimina una partida por completo (p. ej. duplicada o creada por error).
+ * Solo si no tiene cobros/pagos: si los tiene, primero se deshacen (quitan saldo real).
+ * Para dejar de proyectar algo que sí existió, mejor cancelarla.
+ */
 export const DELETE = route<{ params: { id: string } }>(async (_req, { params }) => {
   const user = await requireUser();
   const o = await load(params.id);
   await assertEntityAccess(user, o.entityId);
-  if (!o.isHypothetical) throw conflict('Las partidas reales no se eliminan: cancélalas');
-  await prisma.obligation.delete({ where: { id: o.id } });
+  await deleteObligation(o.id);
   return ok({ ok: true });
 });
