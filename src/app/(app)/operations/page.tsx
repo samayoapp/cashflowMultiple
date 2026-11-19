@@ -18,7 +18,7 @@ import { api, emitDataChanged, useApi } from '@/lib/client/api';
 import { CardChargeModal, CardPaymentModal, cardStatusBadge, type CardPaymentTarget } from '@/components/cards';
 import type { CardSummaryDto } from '@/lib/server/cards';
 import { formatMoney } from '@/lib/money';
-import { formatShortDate } from '@/lib/dates';
+import { addMonths, endOfMonth, formatDateYear, formatShortDate } from '@/lib/dates';
 import type { ObligationDto, RuleDto, UpcomingOccurrenceDto } from '@/lib/server/dto';
 
 type Tab = 'IN' | 'OUT' | 'cards' | 'rules' | 'transfers';
@@ -52,6 +52,39 @@ export default function OperationsPage() {
   );
 }
 
+type PeriodKey = 'all' | 'month' | 'prev_month' | 'year' | 'prev_year' | 'custom';
+const PERIOD_LABEL: Record<PeriodKey, string> = {
+  all: 'Todo el período',
+  month: 'Este mes',
+  prev_month: 'Mes anterior',
+  year: 'Este año',
+  prev_year: 'Año anterior',
+  custom: 'Rango personalizado…',
+};
+const LIST_LIMIT = 2000;
+
+/** Rango de vencimiento [desde, hasta] de un período (null = sin límite). */
+function periodRange(p: PeriodKey, today: string, custom: { from: string; to: string }): { from: string | null; to: string | null } {
+  const month0 = `${today.slice(0, 7)}-01`;
+  const year = Number(today.slice(0, 4));
+  switch (p) {
+    case 'month':
+      return { from: month0, to: endOfMonth(month0) };
+    case 'prev_month': {
+      const prev = addMonths(month0, -1);
+      return { from: prev, to: endOfMonth(prev) };
+    }
+    case 'year':
+      return { from: `${year}-01-01`, to: `${year}-12-31` };
+    case 'prev_year':
+      return { from: `${year - 1}-01-01`, to: `${year - 1}-12-31` };
+    case 'custom':
+      return { from: custom.from || null, to: custom.to || null };
+    default:
+      return { from: null, to: null };
+  }
+}
+
 const STATUS_LABEL: Record<string, { label: string; tone: 'slate' | 'green' | 'amber' | 'red' }> = {
   OPEN: { label: 'Pendiente', tone: 'slate' },
   PARTIAL: { label: 'Abono parcial', tone: 'amber' },
@@ -72,11 +105,19 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
   const [q, setQ] = useState('');
   const [query, setQuery] = useState('');
   const [origin, setOrigin] = useState<'all' | 'single' | 'recurring'>('all');
+  const [period, setPeriod] = useState<PeriodKey>('all');
+  const [custom, setCustom] = useState({ from: '', to: '' });
+  const range = periodRange(period, app.today, custom);
+  // Pendientes: lo más urgente primero. Historial: lo más reciente primero.
+  const order = status === 'open' ? 'asc' : 'desc';
   const qs = query ? `&q=${encodeURIComponent(query)}` : '';
-  const url = `/api/obligations?ctx=${encodeURIComponent(app.ctx)}&direction=${direction}&status=${status}&transfers=exclude${qs}`;
-  const { data, error, loading } = useApi<ObligationDto[]>(url);
+  const params = new URLSearchParams({ ctx: app.ctx, direction, status, transfers: 'exclude', order, limit: String(LIST_LIMIT) });
+  if (query) params.set('q', query);
+  if (range.from) params.set('from', range.from);
+  if (range.to) params.set('to', range.to);
+  const { data, error, loading } = useApi<ObligationDto[]>(`/api/obligations?${params}`);
   // Próximas ocurrencias de recurrencias que aún no existen como CxC/CxP
-  const showUpcoming = status !== 'closed' && origin !== 'single';
+  const showUpcoming = status !== 'closed' && origin !== 'single' && (!range.to || range.to >= app.today);
   const upcoming = useApi<UpcomingOccurrenceDto[]>(
     showUpcoming ? `/api/recurrences/upcoming?ctx=${encodeURIComponent(app.ctx)}&direction=${direction}&days=${UPCOMING_DAYS}${qs}` : null,
   );
@@ -98,21 +139,39 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
       )
       .map((ob) => ({ kind: 'ob', date: ob.expectedDate, ob }));
     const ups: Row[] = showUpcoming
-      ? (upcoming.data ?? []).filter((u) => priority === 'ALL' || u.priority === priority).map((up) => ({ kind: 'up', date: up.date, up }))
+      ? (upcoming.data ?? [])
+          .filter(
+            (u) =>
+              (priority === 'ALL' || u.priority === priority) &&
+              (!range.from || u.date >= range.from) &&
+              (!range.to || u.date <= range.to),
+          )
+          .map((up) => ({ kind: 'up', date: up.date, up }))
       : [];
     // Orden estable: a igual fecha, la partida real antes que la proyectada
-    return [...obs, ...ups].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
-  }, [data, upcoming.data, showUpcoming, priority, origin, app.whatIf]);
+    const dir = order === 'asc' ? 1 : -1;
+    return [...obs, ...ups].sort((a, b) => (a.date < b.date ? -dir : a.date > b.date ? dir : 0));
+  }, [data, upcoming.data, showUpcoming, priority, origin, app.whatIf, range.from, range.to, order]);
 
+  /** Totales del período por moneda (sin hipotéticas ni canceladas). */
   const totals = useMemo(() => {
-    const real = new Map<string, number>();
+    const real = new Map<string, { amount: number; paid: number; remaining: number; count: number }>();
     const projected = new Map<string, number>();
     for (const r of rows) {
-      if (r.kind === 'ob' && r.ob.isHypothetical) continue;
-      const entityId = r.kind === 'ob' ? r.ob.entityId : r.up.entityId;
-      const cur = app.entityById.get(entityId)?.currency ?? '—';
-      const m = r.kind === 'ob' ? real : projected;
-      m.set(cur, (m.get(cur) ?? 0) + (r.kind === 'ob' ? r.ob.remaining : r.up.amount));
+      if (r.kind === 'up') {
+        const cur = app.entityById.get(r.up.entityId)?.currency ?? '—';
+        projected.set(cur, (projected.get(cur) ?? 0) + r.up.amount);
+        continue;
+      }
+      const o = r.ob;
+      if (o.isHypothetical || o.status === 'CANCELLED') continue;
+      const cur = app.entityById.get(o.entityId)?.currency ?? '—';
+      const t = real.get(cur) ?? { amount: 0, paid: 0, remaining: 0, count: 0 };
+      t.amount += o.amount;
+      t.paid += o.paid;
+      t.remaining += o.remaining;
+      t.count++;
+      real.set(cur, t);
     }
     return { real: Array.from(real.entries()), projected: Array.from(projected.entries()) };
   }, [rows, app.entityById]);
@@ -212,6 +271,20 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
           <option value="single">Solo puntuales</option>
           <option value="recurring">Solo recurrentes</option>
         </select>
+        <select className="input w-auto" value={period} onChange={(e) => setPeriod(e.target.value as PeriodKey)} title="Período por fecha de vencimiento">
+          {(Object.keys(PERIOD_LABEL) as PeriodKey[]).map((k) => (
+            <option key={k} value={k}>
+              {PERIOD_LABEL[k]}
+            </option>
+          ))}
+        </select>
+        {period === 'custom' && (
+          <span className="flex items-center gap-1 text-sm text-slate-500">
+            <input className="input w-auto" type="date" value={custom.from} onChange={(e) => setCustom((c) => ({ ...c, from: e.target.value }))} aria-label="Desde" />
+            <span>a</span>
+            <input className="input w-auto" type="date" value={custom.to} onChange={(e) => setCustom((c) => ({ ...c, to: e.target.value }))} aria-label="Hasta" />
+          </span>
+        )}
         {!isIn && (
           <select className="input w-auto" value={priority} onChange={(e) => setPriority(e.target.value as typeof priority)}>
             <option value="ALL">Toda prioridad</option>
@@ -220,16 +293,6 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
           </select>
         )}
         <div className="ml-auto flex items-center gap-3">
-          {totals.real.map(([cur, v]) => (
-            <span key={cur} className="text-sm text-slate-500">
-              Pendiente: <strong className="tabular-nums text-slate-900 dark:text-white">{formatMoney(v, cur)}</strong>
-            </span>
-          ))}
-          {totals.projected.map(([cur, v]) => (
-            <span key={`p-${cur}`} className="text-sm text-slate-500" title={`Ocurrencias recurrentes de los próximos ${UPCOMING_DAYS} días que aún no se han registrado`}>
-              Recurrentes {UPCOMING_DAYS} d: <strong className="tabular-nums text-sky-700 dark:text-sky-400">{formatMoney(v, cur)}</strong>
-            </span>
-          ))}
           {!isIn && (
             <Button onClick={() => setCharging(true)}>
               <CreditCard className="h-4 w-4" /> Gasto con tarjeta
@@ -244,6 +307,41 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
         </div>
       </div>
 
+      {(totals.real.length > 0 || totals.projected.length > 0) && (
+        <div className="flex flex-wrap gap-x-6 gap-y-1 border-b border-slate-200 bg-slate-50/60 px-3 py-2 text-sm text-slate-500 dark:border-slate-800 dark:bg-slate-800/30">
+          {totals.real.map(([cur, t]) => (
+            <span key={cur} className="flex flex-wrap gap-x-4">
+              <span>
+                {t.count} partida{t.count === 1 ? '' : 's'}
+                {range.from || range.to ? ` · ${PERIOD_LABEL[period].replace('…', '')}` : ''}
+              </span>
+              <span>
+                Monto: <strong className="tabular-nums text-slate-900 dark:text-white">{formatMoney(t.amount, cur)}</strong>
+              </span>
+              <span>
+                {isIn ? 'Cobrado' : 'Pagado'}: <strong className="tabular-nums text-slate-900 dark:text-white">{formatMoney(t.paid, cur)}</strong>
+              </span>
+              <span>
+                Pendiente:{' '}
+                <strong className={cn('tabular-nums', isIn ? 'text-emerald-700 dark:text-emerald-400' : 'text-rose-700 dark:text-rose-400')}>
+                  {formatMoney(t.remaining, cur)}
+                </strong>
+              </span>
+            </span>
+          ))}
+          {totals.projected.map(([cur, v]) => (
+            <span key={`p-${cur}`} title={`Ocurrencias recurrentes de los próximos ${UPCOMING_DAYS} días que aún no se han registrado`}>
+              Recurrentes {UPCOMING_DAYS} d: <strong className="tabular-nums text-sky-700 dark:text-sky-400">{formatMoney(v, cur)}</strong>
+            </span>
+          ))}
+        </div>
+      )}
+      {data && data.length >= LIST_LIMIT && (
+        <p className="border-b border-amber-200 bg-amber-50 px-3 py-1.5 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-300">
+          Se muestran las primeras {LIST_LIMIT} partidas. Acota el período para ver el resto.
+        </p>
+      )}
+
       {error || upcoming.error ? (
         <div className="p-4">
           <ErrorBox message={(error || upcoming.error)!} />
@@ -251,7 +349,9 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
       ) : (loading && !data) || (showUpcoming && upcoming.loading && !upcoming.data) ? (
         <Loading />
       ) : rows.length === 0 ? (
-        <EmptyState title={isIn ? 'No hay cuentas por cobrar' : 'No hay cuentas por pagar'}>Crea una con los botones de arriba.</EmptyState>
+        <EmptyState title={isIn ? 'No hay cuentas por cobrar' : 'No hay cuentas por pagar'}>
+          {range.from || range.to || status !== 'open' ? 'Nada en este período o filtro.' : 'Crea una con los botones de arriba.'}
+        </EmptyState>
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full">
@@ -328,6 +428,7 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
                 const overdue = (o.status === 'OPEN' || o.status === 'PARTIAL') && o.expectedDate < app.today;
                 const closed = o.status === 'SETTLED' || o.status === 'CANCELLED';
                 const st = STATUS_LABEL[o.status];
+                const lastPay = o.payments[o.payments.length - 1];
                 return (
                   <tr key={o.id} className="border-t border-slate-100 dark:border-slate-800">
                     <td className="td max-w-xs">
@@ -342,13 +443,20 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
                         {!isIn && <Badge tone={o.priority === 'FIXED' ? 'amber' : 'slate'}>{o.priority === 'FIXED' ? 'Inamovible' : 'Flexible'}</Badge>}
                       </div>
                     </td>
-                    <td className="td text-slate-500">{formatShortDate(o.dueDate)}</td>
-                    <td className={cn('td', overdue && 'font-semibold text-rose-600')}>
-                      {formatShortDate(o.expectedDate)}
+                    <td className="td whitespace-nowrap text-slate-500">{formatDateYear(o.dueDate, app.today)}</td>
+                    <td className={cn('td whitespace-nowrap', overdue && 'font-semibold text-rose-600')}>
+                      {formatDateYear(o.expectedDate, app.today)}
                       {overdue && <div className="text-[11px]">Vencida</div>}
                     </td>
                     <td className="td num">{formatMoney(o.amount, cur)}</td>
-                    <td className="td num text-slate-500">{o.paid ? formatMoney(o.paid, cur) : '—'}</td>
+                    <td className="td num text-slate-500">
+                      {o.paid ? formatMoney(o.paid, cur) : '—'}
+                      {lastPay && (
+                        <div className="text-[11px] font-normal" title={`Último ${isIn ? 'cobro' : 'pago'} · ${lastPay.accountName}`}>
+                          {formatDateYear(lastPay.date, app.today)} · {lastPay.accountName}
+                        </div>
+                      )}
+                    </td>
                     <td className={cn('td num font-semibold', isIn ? 'text-emerald-700 dark:text-emerald-400' : 'text-rose-700 dark:text-rose-400')}>
                       {formatMoney(o.remaining, cur)}
                     </td>
@@ -477,8 +585,8 @@ function RulesTab() {
                     </td>
                     <td className="td">{r.direction === 'IN' ? <Badge tone="green">Ingreso</Badge> : <Badge tone="red">Gasto</Badge>}</td>
                     <td className="td">{FREQ[r.frequency]}</td>
-                    <td className="td">{formatShortDate(r.startDate)}</td>
-                    <td className="td">{r.endDate ? formatShortDate(r.endDate) : 'Indefinido'}</td>
+                    <td className="td">{formatDateYear(r.startDate, app.today)}</td>
+                    <td className="td">{r.endDate ? formatDateYear(r.endDate, app.today) : 'Indefinido'}</td>
                     <td className="td num font-semibold">{formatMoney(r.amount, e?.currency ?? 'HNL')}</td>
                     <td className="td">
                       <Toggle checked={r.active} onChange={(v) => toggle(r, v)} />
@@ -609,7 +717,7 @@ function TransfersTab() {
                         </div>
                         {t.description && <div className="text-xs text-slate-500">{t.description}</div>}
                       </td>
-                      <td className="td">{formatShortDate(t.date)}</td>
+                      <td className="td">{formatDateYear(t.date, app.today)}</td>
                       <td className="td num">{formatMoney(t.amount, ent?.currency ?? 'HNL')}</td>
                       <td className="td">
                         <Badge tone={voided ? 'red' : 'green'}>{voided ? 'Anulada' : 'Ejecutada'}</Badge>
@@ -679,7 +787,7 @@ function TransfersTab() {
                         {from && <EntityDot color={from.color} />} {from?.name ?? '—'} → {to && <EntityDot color={to.color} />} {to?.name ?? '—'}
                       </span>
                     </td>
-                    <td className="td">{formatShortDate(t.executedDate ?? t.expectedDate)}</td>
+                    <td className="td">{formatDateYear(t.executedDate ?? t.expectedDate, app.today)}</td>
                     <td className="td num">{formatMoney(t.amountFrom, from?.currency ?? 'HNL')}</td>
                     <td className="td num">{formatMoney(t.amountTo, to?.currency ?? 'HNL')}</td>
                     <td className="td">

@@ -78,3 +78,16 @@ export function formatLongDate(iso: ISODate): string {
     timeZone: 'UTC',
   });
 }
+
+/** Fecha corta que agrega el año cuando no es el de `ref` (p. ej. "12 mar 2025"). */
+export function formatDateYear(iso: ISODate, ref: ISODate): string {
+  if (iso.slice(0, 4) === ref.slice(0, 4)) return formatShortDate(iso);
+  const d = toUTCDate(iso);
+  return d.toLocaleDateString('es-HN', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'UTC' });
+}
+
+/** Último día del mes de la fecha. */
+export function endOfMonth(iso: ISODate): ISODate {
+  const d = toUTCDate(iso);
+  return fromUTCDate(new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)));
+}
