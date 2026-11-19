@@ -48,15 +48,57 @@ export async function getOpeningSlots(tx: Tx, account: Account): Promise<Opening
   );
 }
 
+/** Fecha del saldo de apertura de una cuenta líquida (null si no tiene apertura registrada). */
+export async function liquidOpeningDate(tx: Tx, accountId: string): Promise<ISODate | null> {
+  const mv = await tx.cashMovement.findFirst({
+    where: { accountId, type: 'OPENING', currency: null },
+    orderBy: { createdAt: 'asc' },
+    select: { date: true },
+  });
+  return mv ? isoOf(mv.date) : null;
+}
+
+/**
+ * Historia reconstruida: el saldo real es apertura + movimientos, así que ningún movimiento de una
+ * cuenta líquida puede quedar antes de su apertura (se contaría dos veces). Las tarjetas no aplican.
+ */
+export async function assertOnOrAfterOpening(
+  tx: Tx,
+  account: Pick<Account, 'id' | 'name' | 'type'>,
+  date: ISODate,
+): Promise<void> {
+  if (account.type === 'CREDIT_CARD') return;
+  const opening = await liquidOpeningDate(tx, account.id);
+  if (opening && date < opening) {
+    throw badRequest(
+      `La fecha ${date} es anterior a la apertura de "${account.name}" (${opening}). ` +
+        'Para cargar historia, primero mueve la apertura de la cuenta hacia atrás (Configuración → Cuentas → Editar) ' +
+        'con el saldo que tenía en esa fecha.',
+    );
+  }
+}
+
 /** Corrige el saldo de apertura de una cuenta líquida (el movimiento OPENING). */
 async function setLiquidOpening(tx: Tx, account: Account, amount: Cents, date: ISODate, userId: string) {
   const mv = await tx.cashMovement.findFirst({
     where: { accountId: account.id, type: 'OPENING', currency: null },
     orderBy: { createdAt: 'asc' },
   });
+  // La apertura es el punto de partida: no puede quedar después de movimientos ya registrados
+  const earliest = await tx.cashMovement.findFirst({
+    where: { accountId: account.id, currency: null, ...(mv ? { id: { not: mv.id } } : {}) },
+    orderBy: { date: 'asc' },
+    select: { date: true },
+  });
+  if (earliest && isoOf(earliest.date) < date) {
+    throw badRequest(
+      `La cuenta tiene movimientos desde ${isoOf(earliest.date)}: la fecha de apertura debe ser igual o anterior.`,
+    );
+  }
   if (mv) {
     await tx.cashMovement.update({ where: { id: mv.id }, data: { amount: dec(amount), date: dbDate(date) } });
-  } else if (amount !== 0) {
+  } else {
+    // Aunque el saldo sea 0 se registra: marca desde cuándo existe historia de la cuenta
     await tx.cashMovement.create({
       data: {
         entityId: account.entityId,

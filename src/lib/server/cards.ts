@@ -6,6 +6,7 @@ import { cents, dbDate, dec, isoOf } from './serialize';
 import { assertCategory, resolveCounterparty } from './catalog';
 import { createTransferTx } from './services';
 import { cardRateFor, getCurrentFx } from './fx';
+import { assertOnOrAfterOpening } from './account-opening';
 import {
   allocatePayment,
   buildSchedule,
@@ -294,6 +295,7 @@ export async function payCreditCard(args: {
     if (!from || from.entityId !== card.entityId) throw badRequest('La cuenta de origen no pertenece a la unidad de negocio');
     if (from.type === 'CREDIT_CARD') throw badRequest('Una tarjeta no puede pagarse con otra tarjeta');
     if (from.archivedAt) throw badRequest('La cuenta de origen está archivada');
+    await assertOnOrAfterOpening(tx, from, args.date);
     const base = await entityCurrency(tx, card.entityId);
 
     const debtBase = -(await cardBalance(tx, card.id, null));

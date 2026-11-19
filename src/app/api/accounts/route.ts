@@ -102,7 +102,8 @@ export const POST = route(async (req) => {
           kind: 'UNBILLED',
         });
       }
-    } else if (data.openingBalance !== 0) {
+    } else {
+      // Siempre se registra (aunque sea 0): fija desde cuándo existe historia de la cuenta
       await tx.cashMovement.create({
         data: {
           entityId: a.entityId,

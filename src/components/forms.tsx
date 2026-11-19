@@ -496,6 +496,13 @@ export function AccountFormModal({ open, onClose, account }: { open: boolean; on
             <Field label="Fecha del saldo">
               <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
             </Field>
+            {editing && (
+              <p className="col-span-2 rounded-lg bg-sky-50 p-2 text-xs text-sky-900 dark:bg-sky-500/10 dark:text-sky-200">
+                <strong>Cargar historia:</strong> lleva la fecha hacia atrás (p. ej. 01/01 del año) y pon el saldo que la cuenta tenía ese día.
+                Luego registra los cobros, pagos y transferencias desde esa fecha; al final usa <strong>Conciliar</strong> para cuadrar con el
+                banco. Ningún movimiento puede quedar antes de esta fecha.
+              </p>
+            )}
           </div>
         )}
         {editing && (
@@ -561,9 +568,19 @@ export function ObligationFormModal({
   const [priority, setPriority] = useState<'FIXED' | 'FLEXIBLE'>('FLEXIBLE');
   const [isHypothetical, setIsHypothetical] = useState(false);
   const [notes, setNotes] = useState('');
+  // Historia: crear la partida ya liquidada (cuenta y fecha real del pago/cobro)
+  const [settled, setSettled] = useState(false);
+  const [settleAccount, setSettleAccount] = useState('');
+  const [settleDate, setSettleDate] = useState(app.today);
+  const [settleDateTouched, setSettleDateTouched] = useState(false);
   const catalog = useApi<{ counterparties: { id: string; entityId: string; name: string }[] }>(
     open && entityId ? `/api/catalog?ctx=${entityId}` : null,
   );
+  const entityAccounts = useApi<AccountDto[]>(open && !obligation && settled && entityId ? `/api/accounts?ctx=${entityId}` : null);
+  const settleAccounts = useMemo(() => liquidAccounts(entityAccounts.data), [entityAccounts.data]);
+  useEffect(() => {
+    if (settleAccount && !settleAccounts.some((a) => a.id === settleAccount)) setSettleAccount('');
+  }, [settleAccounts, settleAccount]);
 
   useEffect(() => {
     if (!open) return;
@@ -577,6 +594,10 @@ export function ObligationFormModal({
     setPriority(obligation?.priority ?? (direction === 'OUT' ? 'FIXED' : 'FLEXIBLE'));
     setIsHypothetical(obligation?.isHypothetical ?? Boolean(hypothetical));
     setNotes(obligation?.notes ?? '');
+    setSettled(false);
+    setSettleAccount('');
+    setSettleDate(app.today);
+    setSettleDateTouched(false);
   }, [open, obligation, defaultEntity, app.today, direction, hypothetical, setError]);
 
   const isIn = (obligation?.direction ?? direction) === 'IN';
@@ -585,6 +606,8 @@ export function ObligationFormModal({
     e.preventDefault();
     const a = parseMoneyInput(amount);
     if (a === null || Number(a) <= 0) return setError('Monto inválido');
+    const settling = !obligation && settled && !isHypothetical;
+    if (settling && !settleAccount) return setError(`Elige la cuenta ${isIn ? 'que recibió el cobro' : 'que hizo el pago'}`);
     const base = {
       description,
       amount: a,
@@ -598,8 +621,16 @@ export function ObligationFormModal({
       () =>
         obligation
           ? api(`/api/obligations/${obligation.id}`, { method: 'PATCH', body: base })
-          : api('/api/obligations', { body: { ...base, entityId, direction, isHypothetical } }),
-      obligation ? 'Partida actualizada' : 'Partida registrada',
+          : api('/api/obligations', {
+              body: {
+                ...base,
+                entityId,
+                direction,
+                isHypothetical,
+                ...(settling ? { settlement: { accountId: settleAccount, date: settleDate } } : {}),
+              },
+            }),
+      obligation ? 'Partida actualizada' : settling ? `Partida registrada como ${isIn ? 'cobrada' : 'pagada'}` : 'Partida registrada',
     );
     if (ok) onClose();
   }
@@ -644,6 +675,7 @@ export function ObligationFormModal({
               value={dueDate}
               onChange={(e) => {
                 if (expectedDate === dueDate) setExpectedDate(e.target.value);
+                if (!settleDateTouched) setSettleDate(e.target.value);
                 setDueDate(e.target.value);
               }}
               required
@@ -664,7 +696,51 @@ export function ObligationFormModal({
         <Field label="Notas (opcional)">
           <textarea className="input" rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} maxLength={1000} />
         </Field>
-        {!obligation && (
+        {!obligation && !isHypothetical && (
+          <div className="space-y-3 rounded-lg border border-slate-200 p-3 dark:border-slate-700">
+            <Toggle
+              checked={settled}
+              onChange={(v) => {
+                setSettled(v);
+                if (v && !settleDateTouched) setSettleDate(dueDate);
+              }}
+              label={<span className="text-sm">Ya fue {isIn ? 'cobrada' : 'pagada'} (registrar historia)</span>}
+            />
+            {settled && (
+              <>
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label={isIn ? 'Cuenta que recibió' : 'Cuenta que pagó'}>
+                    <select className="input" value={settleAccount} onChange={(e) => setSettleAccount(e.target.value)} required>
+                      <option value="">Selecciona…</option>
+                      {settleAccounts.map((acc) => (
+                        <option key={acc.id} value={acc.id}>
+                          {acc.name}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label={`Fecha real del ${isIn ? 'cobro' : 'pago'}`}>
+                    <input
+                      className="input"
+                      type="date"
+                      value={settleDate}
+                      onChange={(e) => {
+                        setSettleDate(e.target.value);
+                        setSettleDateTouched(true);
+                      }}
+                      required
+                    />
+                  </Field>
+                </div>
+                <p className="text-xs text-slate-500">
+                  Se registra el {isIn ? 'cobro' : 'pago'} completo y mueve el saldo de la cuenta en esa fecha. La fecha no puede ser anterior a la apertura
+                  de la cuenta: para cargar historia, primero lleva la apertura hacia atrás con el saldo que tenía entonces.
+                </p>
+              </>
+            )}
+          </div>
+        )}
+        {!obligation && !settled && (
           <Toggle
             tone="violet"
             checked={isHypothetical}

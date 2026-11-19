@@ -7,6 +7,9 @@ import { assertEntityAccess, resolveContext } from '@/lib/server/scope';
 import { obligationDto, obligationInclude } from '@/lib/server/dto';
 import { dbDate, dec } from '@/lib/server/serialize';
 import { assertCategory, resolveCounterparty } from '@/lib/server/catalog';
+import { registerPaymentTx } from '@/lib/server/services';
+import { badRequest } from '@/lib/server/api';
+import { isISODate } from '@/lib/dates';
 import { direction, id, isoDate, optionalText, positiveMoney, priority, shortText } from '@/lib/validation';
 
 export const dynamic = 'force-dynamic';
@@ -14,6 +17,8 @@ export const dynamic = 'force-dynamic';
 /**
  * Lista CxC/CxP del contexto.
  * ?direction=IN|OUT  ?status=open|closed|all  ?transfers=include|only|exclude  ?q=texto
+ * ?from=YYYY-MM-DD&to=YYYY-MM-DD  período por fecha de vencimiento (ambos opcionales)
+ * ?order=asc|desc  por fecha esperada (default asc)   ?limit=N (default 1000, máx. 5000)
  */
 export const GET = route(async (req) => {
   const user = await requireUser();
@@ -23,6 +28,11 @@ export const GET = route(async (req) => {
   const dir = sp.get('direction');
   const transfers = sp.get('transfers') ?? 'include';
   const q = sp.get('q')?.trim();
+  const from = sp.get('from');
+  const to = sp.get('to');
+  if ((from && !isISODate(from)) || (to && !isISODate(to))) throw badRequest('Período inválido');
+  const order = sp.get('order') === 'desc' ? 'desc' : 'asc';
+  const limit = Math.min(Math.max(Number(sp.get('limit')) || 1000, 1), 5000);
 
   const where: Prisma.ObligationWhereInput = {
     entityId: { in: ctx.entityIds },
@@ -32,6 +42,7 @@ export const GET = route(async (req) => {
       : status === 'closed'
         ? { status: { in: ['SETTLED', 'CANCELLED'] } }
         : {}),
+    ...(from || to ? { dueDate: { ...(from ? { gte: dbDate(from) } : {}), ...(to ? { lte: dbDate(to) } : {}) } } : {}),
     ...(transfers === 'exclude' ? { transferId: null } : transfers === 'only' ? { transferId: { not: null } } : {}),
     ...(q
       ? {
@@ -46,8 +57,8 @@ export const GET = route(async (req) => {
   const rows = await prisma.obligation.findMany({
     where,
     include: obligationInclude,
-    orderBy: [{ expectedDate: 'asc' }, { createdAt: 'asc' }],
-    take: 1000,
+    orderBy: [{ expectedDate: order }, { createdAt: order }],
+    take: limit,
   });
   return ok(rows.map(obligationDto));
 });
@@ -65,6 +76,8 @@ const createSchema = z.object({
   counterpartyName: z.string().trim().max(160).optional().nullable(),
   categoryId: id.optional().nullable(),
   notes: optionalText(1000),
+  /** Historia: la partida nace ya pagada/cobrada completa desde esta cuenta y fecha. */
+  settlement: z.object({ accountId: id, date: isoDate }).optional().nullable(),
 });
 
 export const POST = route(async (req) => {
@@ -80,7 +93,8 @@ export const POST = route(async (req) => {
       data.direction === 'IN' ? 'CUSTOMER' : 'SUPPLIER',
     );
     const categoryId = await assertCategory(tx, data.entityId, data.categoryId);
-    return tx.obligation.create({
+    if (data.settlement && data.isHypothetical) throw badRequest('Una partida hipotética no puede nacer liquidada');
+    const ob = await tx.obligation.create({
       data: {
         entityId: data.entityId,
         direction: data.direction,
@@ -95,8 +109,17 @@ export const POST = route(async (req) => {
         notes: data.notes,
         createdById: user.id,
       },
-      include: obligationInclude,
     });
+    if (data.settlement) {
+      await registerPaymentTx(tx, {
+        obligationId: ob.id,
+        accountId: data.settlement.accountId,
+        amount: data.amount,
+        date: data.settlement.date,
+        userId: user.id,
+      });
+    }
+    return tx.obligation.findUniqueOrThrow({ where: { id: ob.id }, include: obligationInclude });
   });
   return ok(obligationDto(created), { status: 201 });
 });

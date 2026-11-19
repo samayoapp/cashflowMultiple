@@ -138,7 +138,7 @@ export const PATCH = route<{ params: { id: string } }>(async (req, { params }) =
       const slot = slots.find((x) => x.currency === w.currency && x.kind === w.kind);
       const amount = w.amount ?? slot?.amount ?? 0;
       const date = data.openingDate ?? slot?.date ?? today;
-      if (slot && amount === slot.amount && (slot.date === date || (amount === 0 && !slot.date))) continue;
+      if (slot && amount === slot.amount && (slot.date === date || (amount === 0 && !slot.date && (isCard || !data.openingDate)))) continue;
       await setOpening(tx, updated, { currency: w.currency, kind: w.kind, amount, date, userId: user.id });
     }
     const cycleChanged = isCard && (updated.statementDay !== a.statementDay || updated.paymentDueDay !== a.paymentDueDay);

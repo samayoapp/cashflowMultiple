@@ -6,6 +6,7 @@ import { expandRule } from '@/lib/projection/recurrence';
 import type { ISODate } from '@/lib/dates';
 import type { Cents } from '@/lib/money';
 import { insertCardCharge } from './cards';
+import { assertOnOrAfterOpening } from './account-opening';
 
 type Tx = Prisma.TransactionClient;
 
@@ -21,7 +22,7 @@ async function lockObligation(tx: Tx, id: string) {
  * Registra un abono (parcial o total). En una sola transacción:
  * crea el movimiento real de caja, el abono y actualiza el estado.
  */
-export async function registerPayment(args: {
+export interface RegisterPaymentArgs {
   obligationId: string;
   accountId: string;
   amount: Cents;
@@ -30,8 +31,15 @@ export async function registerPayment(args: {
   /** Solo si la cuenta es una tarjeta de crédito: número de cuotas (1..36). */
   installments?: number;
   userId: string;
-}) {
-  return prisma.$transaction(async (tx) => {
+}
+
+export async function registerPayment(args: RegisterPaymentArgs) {
+  return prisma.$transaction((tx) => registerPaymentTx(tx, args));
+}
+
+/** Igual que registerPayment, dentro de una transacción existente (p. ej. crear y liquidar a la vez). */
+export async function registerPaymentTx(tx: Tx, args: RegisterPaymentArgs) {
+  {
     const { ob, paid, remaining } = await lockObligation(tx, args.obligationId);
     if (ob.isHypothetical) throw conflict('Una partida hipotética no puede recibir abonos reales');
     if (ob.transferId) throw conflict('Esta partida es una transferencia: usa "Ejecutar transferencia"');
@@ -43,6 +51,7 @@ export async function registerPayment(args: {
     if (account.archivedAt) throw badRequest('La cuenta está archivada');
     const isCard = account.type === 'CREDIT_CARD';
     if (isCard && ob.direction === 'IN') throw badRequest('Un cobro no puede registrarse en una tarjeta de crédito');
+    await assertOnOrAfterOpening(tx, account, args.date);
     if (isCard) {
       // Un consumo con tarjeta liquida la CxP completa: la deuda pasa a la tarjeta
       if (args.amount !== remaining) throw badRequest('Con tarjeta se paga el saldo pendiente completo');
@@ -94,7 +103,7 @@ export async function registerPayment(args: {
       data: { status: newRemaining === 0 ? 'SETTLED' : paid + args.amount > 0 ? 'PARTIAL' : 'OPEN' },
     });
     return { payment, remaining: newRemaining };
-  });
+  }
 }
 
 /**
@@ -254,6 +263,8 @@ export async function executeTransfer(args: {
     if (fromAcc.type === 'CREDIT_CARD' || toAcc.type === 'CREDIT_CARD') {
       throw badRequest('Las transferencias entre unidades de negocio usan cuentas líquidas, no tarjetas');
     }
+    await assertOnOrAfterOpening(tx, fromAcc, args.date);
+    await assertOnOrAfterOpening(tx, toAcc, args.date);
 
     const obligations = await tx.obligation.findMany({ where: { transferId: t.id } });
     const date = dbDate(args.date);
@@ -320,6 +331,8 @@ export async function createInternalTransfer(args: {
     if (fromAcc.type === 'CREDIT_CARD' || toAcc.type === 'CREDIT_CARD') {
       throw badRequest('Para pagar una tarjeta usa Operaciones → Tarjetas → Pagar');
     }
+    await assertOnOrAfterOpening(tx, fromAcc, args.date);
+    await assertOnOrAfterOpening(tx, toAcc, args.date);
 
     const date = dbDate(args.date);
     const label = args.description || 'Transferencia interna';
@@ -387,6 +400,7 @@ export async function reconcileAccount(args: {
     await tx.$queryRaw`SELECT id FROM "Account" WHERE id = ${args.accountId} FOR UPDATE`;
     const account = await tx.account.findUnique({ where: { id: args.accountId } });
     if (!account) throw notFound('Cuenta no encontrada');
+    await assertOnOrAfterOpening(tx, account, args.date);
     const entity = await tx.entity.findUniqueOrThrow({ where: { id: account.entityId }, select: { currency: true } });
     const currency = args.currency && args.currency !== entity.currency ? args.currency : null;
     if (currency && account.foreignCurrency !== currency) throw badRequest('La cuenta no maneja esa moneda');
