@@ -3,6 +3,7 @@
 import {
   Bar,
   CartesianGrid,
+  Cell,
   ComposedChart,
   Line,
   ReferenceLine,
@@ -12,6 +13,7 @@ import {
   YAxis,
 } from 'recharts';
 import type { ProjectionResult } from '@/lib/projection/types';
+import type { HistoryResult } from '@/lib/projection/history';
 import type { EntityDto } from '@/lib/server/dto';
 import { formatShortDate } from '@/lib/dates';
 import { formatMoney } from '@/lib/money';
@@ -19,17 +21,46 @@ import { formatMoney } from '@/lib/money';
 const IN_SINGLE = '#10b981';
 const OUT_SINGLE = '#f43f5e';
 
+type Row = Record<string, number | string | boolean | undefined>;
+
 /**
  * Gráfica combinada 13 semanas: barras apiladas por entidad (entradas arriba,
  * salidas abajo), línea de saldo proyectado y umbral mínimo punteado.
+ * Con `history`, antepone las semanas reales (barras tenues + línea de saldo real)
+ * y marca "Hoy" donde empieza la proyección.
  */
-export function ProjectionChart({ result, entities }: { result: ProjectionResult; entities: EntityDto[] }) {
+export function ProjectionChart({
+  result,
+  entities,
+  history,
+}: {
+  result: ProjectionResult;
+  entities: EntityDto[];
+  history?: HistoryResult | null;
+}) {
   const consolidated = result.consolidated && entities.length > 1;
   const currency = result.currency;
   const threshold = result.kpis.threshold / 100;
 
-  const data = result.weeks.map((w) => {
-    const row: Record<string, number | string> = {
+  const past: Row[] = (history?.weeks ?? []).map((w, i, all) => {
+    const row: Row = {
+      label: formatShortDate(w.start),
+      range: `${formatShortDate(w.start)} – ${formatShortDate(w.end)} · real`,
+      real: w.hasData ? w.closing / 100 : undefined,
+      past: true,
+    };
+    // La línea proyectada arranca desde el último saldo real
+    if (i === all.length - 1 && w.hasData) row.closing = w.closing / 100;
+    for (const e of entities) {
+      const f = w.byEntity[e.id];
+      row[`in_${e.id}`] = (f?.inflows ?? 0) / 100;
+      row[`out_${e.id}`] = -(f?.outflows ?? 0) / 100;
+    }
+    return row;
+  });
+
+  const future: Row[] = result.weeks.map((w) => {
+    const row: Row = {
       label: formatShortDate(w.start),
       range: `${formatShortDate(w.start)} – ${formatShortDate(w.end)}`,
       closing: w.closing / 100,
@@ -41,6 +72,9 @@ export function ProjectionChart({ result, entities }: { result: ProjectionResult
     }
     return row;
   });
+
+  const data = [...past, ...future];
+  const todayLabel = past.length ? (future[0]?.label as string | undefined) : undefined;
 
   const fmt = (v: number) => formatMoney(Math.round(v * 100), currency, { compact: true });
   const nameOf = (key: string) => {
@@ -71,7 +105,7 @@ export function ProjectionChart({ result, entities }: { result: ProjectionResult
             labelFormatter={(_l, payload) => (payload?.[0]?.payload as { range?: string })?.range ?? ''}
             formatter={(value: number, key: string) => [
               formatMoney(Math.round(Math.abs(value) * 100), currency),
-              key === 'closing' ? 'Saldo proyectado' : nameOf(key),
+              key === 'closing' ? 'Saldo proyectado' : key === 'real' ? 'Saldo real' : nameOf(key),
             ]}
           />
           <ReferenceLine yAxisId="flow" y={0} stroke="#94a3b8" />
@@ -84,7 +118,11 @@ export function ProjectionChart({ result, entities }: { result: ProjectionResult
               fill={consolidated ? e.color : IN_SINGLE}
               radius={[3, 3, 0, 0]}
               maxBarSize={38}
-            />
+            >
+              {data.map((r, i) => (
+                <Cell key={i} fillOpacity={r.past ? 0.4 : 1} />
+              ))}
+            </Bar>
           ))}
           {entities.map((e) => (
             <Bar
@@ -93,10 +131,13 @@ export function ProjectionChart({ result, entities }: { result: ProjectionResult
               dataKey={`out_${e.id}`}
               stackId="flow"
               fill={consolidated ? e.color : OUT_SINGLE}
-              fillOpacity={consolidated ? 0.45 : 0.85}
               radius={[0, 0, 3, 3]}
               maxBarSize={38}
-            />
+            >
+              {data.map((r, i) => (
+                <Cell key={i} fillOpacity={(consolidated ? 0.45 : 0.85) * (r.past ? 0.45 : 1)} />
+              ))}
+            </Bar>
           ))}
           <Line
             yAxisId="bal"
@@ -107,6 +148,27 @@ export function ProjectionChart({ result, entities }: { result: ProjectionResult
             dot={{ r: 3 }}
             activeDot={{ r: 5 }}
           />
+          {history && (
+            <Line
+              yAxisId="bal"
+              type="monotone"
+              dataKey="real"
+              stroke="#64748b"
+              strokeWidth={2.5}
+              dot={{ r: 2.5 }}
+              activeDot={{ r: 5 }}
+              connectNulls={false}
+            />
+          )}
+          {todayLabel && (
+            <ReferenceLine
+              yAxisId="flow"
+              x={todayLabel}
+              stroke="#0ea5e9"
+              strokeDasharray="3 3"
+              label={{ value: 'Hoy', position: 'insideTopRight', fontSize: 11, fill: '#0ea5e9' }}
+            />
+          )}
           <ReferenceLine
             yAxisId="bal"
             y={threshold}

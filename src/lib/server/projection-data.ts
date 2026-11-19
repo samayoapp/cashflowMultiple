@@ -1,7 +1,8 @@
 import { prisma } from './db';
 import { cents, isoOf, isoOrNull, dbDate } from './serialize';
 import { ENTITY_ORDER, type ResolvedContext } from './scope';
-import { todayInTz } from '@/lib/dates';
+import { addDays, startOfWeek, todayInTz } from '@/lib/dates';
+import { historyStart, type HistoryInput, type HistoryMovement } from '@/lib/projection/history';
 import { cardRateFor, getCurrentFx } from './fx';
 import type {
   EngineAccountBalance,
@@ -211,5 +212,69 @@ export async function loadProjectionInput(ctx: ResolvedContext, whatIf: boolean)
     outputCurrency,
     consolidated: ctx.consolidated,
     whatIf,
+  };
+}
+
+/**
+ * Input del historial real: movimientos de cuentas líquidas (en la moneda de la entidad)
+ * de las N semanas anteriores a la semana en curso, más el saldo previo y el inicio de datos.
+ */
+export async function loadHistoryInput(ctx: ResolvedContext, weeks = 13): Promise<HistoryInput> {
+  const settings = await getSettings();
+  const today = todayInTz(settings.timezone);
+  const start = historyStart(today, weeks);
+  const end = addDays(startOfWeek(today), -1);
+  const entityIds = ctx.entityIds;
+  const liquid = { entityId: { in: entityIds }, currency: null, account: { type: { not: 'CREDIT_CARD' as const } } };
+
+  const [entities, rates, before, first, movements] = await Promise.all([
+    prisma.entity.findMany({ where: { id: { in: entityIds } }, orderBy: ENTITY_ORDER }),
+    prisma.exchangeRate.findMany(),
+    prisma.cashMovement.groupBy({ by: ['entityId'], where: { ...liquid, date: { lt: dbDate(start) } }, _sum: { amount: true } }),
+    prisma.cashMovement.aggregate({ where: liquid, _min: { date: true } }),
+    prisma.cashMovement.findMany({
+      where: { ...liquid, date: { gte: dbDate(start), lte: dbDate(end) } },
+      select: {
+        entityId: true,
+        date: true,
+        amount: true,
+        type: true,
+        accountTransferId: true,
+        payment: { select: { obligation: { select: { category: { select: { name: true } } } } } },
+      },
+    }),
+  ]);
+
+  const engineEntities: EngineEntity[] = entities.map((e) => ({
+    id: e.id,
+    name: e.name,
+    color: e.color,
+    currency: e.currency,
+    minCashThreshold: cents(e.minCashThreshold),
+  }));
+
+  return {
+    today,
+    weeks,
+    entities: engineEntities,
+    rates: rates.map((r) => ({
+      fromCurrency: r.fromCurrency,
+      toCurrency: r.toCurrency,
+      rate: Number(r.rate.toString()),
+      effectiveDate: isoOf(r.effectiveDate),
+    })),
+    outputCurrency: ctx.consolidated ? settings.reportingCurrency : (engineEntities[0]?.currency ?? settings.reportingCurrency),
+    consolidated: ctx.consolidated,
+    balancesBefore: before.map((b) => ({ entityId: b.entityId, balance: cents(b._sum.amount) })),
+    dataStart: isoOrNull(first._min.date),
+    movements: movements.map(
+      (m): HistoryMovement => ({
+        entityId: m.entityId,
+        date: isoOf(m.date),
+        amount: cents(m.amount),
+        kind: m.type === 'TRANSFER' ? (m.accountTransferId ? 'ACCOUNT_TRANSFER' : 'TRANSFER') : m.type,
+        categoryName: m.payment?.obligation.category?.name ?? null,
+      }),
+    ),
   };
 }
