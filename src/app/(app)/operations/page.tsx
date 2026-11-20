@@ -22,7 +22,7 @@ import { CardChargeModal, CardPaymentModal, cardStatusBadge, type CardPaymentTar
 import type { CardSummaryDto } from '@/lib/server/cards';
 import type { TransferDto } from '@/lib/server/dto';
 import { formatMoney } from '@/lib/money';
-import { addMonths, endOfMonth, formatDateYear, formatShortDate } from '@/lib/dates';
+import { addDays, addMonths, endOfMonth, formatDateYear, formatShortDate } from '@/lib/dates';
 import type { ObligationDto, RuleDto, UpcomingOccurrenceDto } from '@/lib/server/dto';
 
 type Tab = 'IN' | 'OUT' | 'cards' | 'rules' | 'transfers';
@@ -98,6 +98,8 @@ const STATUS_LABEL: Record<string, { label: string; tone: 'slate' | 'green' | 'a
 
 /** Días hacia adelante en que se listan las ocurrencias recurrentes junto a las CxC/CxP. */
 const UPCOMING_DAYS = 90;
+/** Días hacia atrás en que se buscan fechas recurrentes nunca registradas (si el período no fija inicio). */
+const PAST_LOOKBACK_DAYS = 365;
 
 type Row = { kind: 'ob'; date: string; ob: ObligationDto } | { kind: 'up'; date: string; up: UpcomingOccurrenceDto };
 
@@ -121,15 +123,19 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
   if (range.to) params.set('to', range.to);
   const { data, error, loading } = useApi<ObligationDto[]>(`/api/obligations?${params}`);
   // Próximas ocurrencias de recurrencias que aún no existen como CxC/CxP
-  const showUpcoming = status !== 'closed' && origin !== 'single' && (!range.to || range.to >= app.today);
+  // y también las fechas PASADAS que nunca se registraron (desde el inicio del período, o 1 año atrás)
+  const showUpcoming = status !== 'closed' && origin !== 'single';
+  const upcomingFrom = range.from ?? addDays(app.today, -PAST_LOOKBACK_DAYS);
   const upcoming = useApi<UpcomingOccurrenceDto[]>(
-    showUpcoming ? `/api/recurrences/upcoming?ctx=${encodeURIComponent(app.ctx)}&direction=${direction}&days=${UPCOMING_DAYS}${qs}` : null,
+    showUpcoming
+      ? `/api/recurrences/upcoming?ctx=${encodeURIComponent(app.ctx)}&direction=${direction}&days=${UPCOMING_DAYS}&from=${upcomingFrom}${qs}`
+      : null,
   );
   const [ruleForm, setRuleForm] = useState<{ open: boolean; rule: RuleDto | null }>({ open: false, rule: null });
   const [busy, setBusy] = useState<string | null>(null);
 
   const [form, setForm] = useState<{ open: boolean; ob: ObligationDto | null }>({ open: false, ob: null });
-  const [pay, setPay] = useState<{ ob: ObligationDto; full: boolean } | null>(null);
+  const [pay, setPay] = useState<{ ob: ObligationDto; full: boolean; date?: string } | null>(null);
   const [move, setMove] = useState<ObligationDto | null>(null);
   const [charging, setCharging] = useState(false);
   const [loanPay, setLoanPay] = useState<{ id: string; partial: boolean } | null>(null);
@@ -162,10 +168,16 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
   const totals = useMemo(() => {
     const real = new Map<string, { amount: number; paid: number; remaining: number; count: number }>();
     const projected = new Map<string, number>();
+    const unregistered = new Map<string, { amount: number; count: number }>();
     for (const r of rows) {
       if (r.kind === 'up') {
         const cur = app.entityById.get(r.up.entityId)?.currency ?? '—';
-        projected.set(cur, (projected.get(cur) ?? 0) + r.up.amount);
+        if (r.up.past) {
+          const t = unregistered.get(cur) ?? { amount: 0, count: 0 };
+          t.amount += r.up.amount;
+          t.count++;
+          unregistered.set(cur, t);
+        } else projected.set(cur, (projected.get(cur) ?? 0) + r.up.amount);
         continue;
       }
       const o = r.ob;
@@ -178,7 +190,7 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
       t.count++;
       real.set(cur, t);
     }
-    return { real: Array.from(real.entries()), projected: Array.from(projected.entries()) };
+    return { real: Array.from(real.entries()), projected: Array.from(projected.entries()), unregistered: Array.from(unregistered.entries()) };
   }, [rows, app.entityById]);
 
   /** Convierte la ocurrencia proyectada en una CxC/CxP real para poder operarla. */
@@ -209,7 +221,7 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
       } catch (e) {
         toast(e instanceof Error ? e.message : 'Error', 'error');
       }
-    } else if (action === 'pay' || action === 'partial') setPay({ ob, full: action === 'pay' });
+    } else if (action === 'pay' || action === 'partial') setPay({ ob, full: action === 'pay', date: u.past ? u.date : undefined });
     else if (action === 'move') setMove(ob);
     else setForm({ open: true, ob });
     emitDataChanged();
@@ -363,6 +375,15 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
               Recurrentes {UPCOMING_DAYS} d: <strong className="tabular-nums text-sky-700 dark:text-sky-400">{formatMoney(v, cur)}</strong>
             </span>
           ))}
+          {totals.unregistered.map(([cur, t]) => (
+            <span
+              key={`u-${cur}`}
+              title="Fechas pasadas de recurrencias que nunca se registraron como cobradas/pagadas ni se omitieron. No afectan la proyección."
+            >
+              Recurrentes sin registrar ({t.count}):{' '}
+              <strong className="tabular-nums text-amber-700 dark:text-amber-400">{formatMoney(t.amount, cur)}</strong>
+            </span>
+          ))}
         </div>
       )}
       {data && data.length >= LIST_LIMIT && (
@@ -404,7 +425,13 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
                   const ucur = ue?.currency ?? 'HNL';
                   const dis = busy === u.key;
                   return (
-                    <tr key={`up:${u.key}`} className="border-t border-slate-100 bg-sky-50/40 dark:border-slate-800 dark:bg-sky-950/10">
+                    <tr
+                      key={`up:${u.key}`}
+                      className={cn(
+                        'border-t border-slate-100 dark:border-slate-800',
+                        u.past ? 'bg-amber-50/50 dark:bg-amber-950/10' : 'bg-sky-50/40 dark:bg-sky-950/10',
+                      )}
+                    >
                       <td className="td max-w-xs">
                         <div className="flex items-center gap-2">
                           {app.ctx === 'all' && ue && <EntityDot color={ue.color} />}
@@ -416,15 +443,21 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
                           {!isIn && <Badge tone={u.priority === 'FIXED' ? 'amber' : 'slate'}>{u.priority === 'FIXED' ? 'Inamovible' : 'Flexible'}</Badge>}
                         </div>
                       </td>
-                      <td className="td text-slate-500">{formatShortDate(u.date)}</td>
-                      <td className="td">{formatShortDate(u.date)}</td>
+                      <td className="td text-slate-500">{formatDateYear(u.date, app.today)}</td>
+                      <td className="td">{formatDateYear(u.date, app.today)}</td>
                       <td className="td num">{formatMoney(u.amount, ucur)}</td>
                       <td className="td num text-slate-500">—</td>
                       <td className={cn('td num font-semibold', isIn ? 'text-emerald-700 dark:text-emerald-400' : 'text-rose-700 dark:text-rose-400')}>
                         {formatMoney(u.amount, ucur)}
                       </td>
                       <td className="td">
-                        <Badge tone="blue">Programada</Badge>
+                        {u.past ? (
+                          <span title="Esta fecha ya pasó y no se registró: márcala como cobrada/pagada (con su fecha real) u omítela">
+                            <Badge tone="amber">Sin registrar</Badge>
+                          </span>
+                        ) : (
+                          <Badge tone="blue">Programada</Badge>
+                        )}
                       </td>
                       <td className="td">
                         <div className="flex justify-end gap-0.5">
@@ -573,7 +606,7 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
         defaultDirection={direction}
         onClose={() => setRuleForm({ open: false, rule: null })}
       />
-      <PaymentModal open={Boolean(pay)} onClose={() => setPay(null)} target={pay?.ob ?? null} full={pay?.full} />
+      <PaymentModal open={Boolean(pay)} onClose={() => setPay(null)} target={pay?.ob ?? null} full={pay?.full} defaultDate={pay?.date} />
       <RescheduleModal open={Boolean(move)} onClose={() => setMove(null)} target={move} />
       <ExecuteTransferModal open={Boolean(loanPay)} onClose={() => setLoanPay(null)} transfer={loanPay} partial={loanPay?.partial} />
       {!isIn && <CardChargeModal open={charging} onClose={() => setCharging(false)} />}

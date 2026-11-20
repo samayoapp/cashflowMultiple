@@ -127,6 +127,8 @@ export interface UpcomingOccurrenceDto {
   priority: RuleDto['priority'];
   counterparty: RuleDto['counterparty'];
   category: RuleDto['category'];
+  /** Fecha ya pasada que nunca se registró como cobro/pago. */
+  past: boolean;
 }
 
 export const transferInclude = {

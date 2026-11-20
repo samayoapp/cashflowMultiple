@@ -1,8 +1,9 @@
 import { prisma } from './db';
 import { cents, isoOf, isoOrNull, dbDate } from './serialize';
 import { ENTITY_ORDER, type ResolvedContext } from './scope';
-import { addDays, startOfWeek, todayInTz } from '@/lib/dates';
+import { addDays, startOfWeek, todayInTz, type ISODate } from '@/lib/dates';
 import { historyStart, type HistoryInput, type HistoryMovement } from '@/lib/projection/history';
+import type { LedgerInput, LedgerMovement } from '@/lib/projection/ledger';
 import { cardRateFor, getCurrentFx } from './fx';
 import type {
   EngineAccountBalance,
@@ -276,5 +277,88 @@ export async function loadHistoryInput(ctx: ResolvedContext, weeks = 13): Promis
         categoryName: m.payment?.obligation.category?.name ?? null,
       }),
     ),
+  };
+}
+
+/**
+ * Input del libro real de la Matriz: movimientos de cuentas líquidas desde `from` hasta hoy,
+ * con la partida (o recurrencia, tarjeta o transferencia) a la que pertenecen.
+ */
+export async function loadLedgerInput(ctx: ResolvedContext, from: ISODate): Promise<LedgerInput> {
+  const settings = await getSettings();
+  const today = todayInTz(settings.timezone);
+  const entityIds = ctx.entityIds;
+  const liquid = { entityId: { in: entityIds }, currency: null, account: { type: { not: 'CREDIT_CARD' as const } } };
+
+  const [entities, rates, first, movements] = await Promise.all([
+    prisma.entity.findMany({ where: { id: { in: entityIds } }, orderBy: ENTITY_ORDER }),
+    prisma.exchangeRate.findMany(),
+    prisma.cashMovement.aggregate({ where: liquid, _min: { date: true } }),
+    prisma.cashMovement.findMany({
+      where: { ...liquid, date: { gte: dbDate(from), lte: dbDate(today) } },
+      select: {
+        entityId: true,
+        date: true,
+        amount: true,
+        type: true,
+        description: true,
+        transferId: true,
+        accountTransferId: true,
+        payment: { select: { obligation: { select: { id: true, description: true, recurrenceId: true } } } },
+        cardPaymentBank: { select: { card: { select: { id: true, name: true } } } },
+      },
+    }),
+  ]);
+
+  const engineEntities: EngineEntity[] = entities.map((e) => ({
+    id: e.id,
+    name: e.name,
+    color: e.color,
+    currency: e.currency,
+    minCashThreshold: cents(e.minCashThreshold),
+  }));
+
+  return {
+    today,
+    from,
+    entities: engineEntities,
+    rates: rates.map((r) => ({
+      fromCurrency: r.fromCurrency,
+      toCurrency: r.toCurrency,
+      rate: Number(r.rate.toString()),
+      effectiveDate: isoOf(r.effectiveDate),
+    })),
+    outputCurrency: ctx.consolidated ? settings.reportingCurrency : (engineEntities[0]?.currency ?? settings.reportingCurrency),
+    consolidated: ctx.consolidated,
+    dataStart: isoOrNull(first._min.date),
+    movements: movements.map((m): LedgerMovement => {
+      const kind = m.type === 'TRANSFER' ? (m.accountTransferId ? 'ACCOUNT_TRANSFER' : 'TRANSFER') : m.type;
+      const ob = m.payment?.obligation;
+      const card = m.cardPaymentBank?.card;
+      let groupKey: string;
+      let label: string;
+      if (ob) {
+        groupKey = ob.recurrenceId ? `rule:${ob.recurrenceId}` : `ob:${ob.id}`;
+        label = ob.description;
+      } else if (card) {
+        groupKey = `card:${card.id}`;
+        label = `Pago de tarjeta ${card.name}`;
+      } else if (m.transferId) {
+        groupKey = `tr:${m.transferId}`;
+        label = m.description || 'Transferencia entre entidades';
+      } else {
+        groupKey = `${m.type}:${m.description ?? ''}`;
+        label = m.description || 'Movimiento';
+      }
+      return {
+        entityId: m.entityId,
+        date: isoOf(m.date),
+        amount: cents(m.amount),
+        kind,
+        groupKey,
+        label,
+        recurring: Boolean(ob?.recurrenceId),
+      };
+    }),
   };
 }

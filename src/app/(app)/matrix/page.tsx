@@ -1,17 +1,18 @@
 'use client';
 
-import { Fragment, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { ChevronDown, ChevronRight, CreditCard, Eye, EyeOff, FlaskConical, Plus, RotateCcw } from 'lucide-react';
 import { useApp } from '@/components/AppContext';
-import { Badge, Button, Card, cn, ErrorBox, Loading, Tabs, useToast } from '@/components/ui';
+import { Badge, Button, Card, cn, ErrorBox, Loading, Tabs, Toggle, useToast } from '@/components/ui';
 import { EntityDot } from '@/components/AppShell';
 import { ObligationFormModal, parseMoneyInput } from '@/components/forms';
 import { CardPaymentModal, type CardPaymentTarget } from '@/components/cards';
 import { useProjection, type ProjectionPayload } from '@/lib/client/useProjection';
-import { api, emitDataChanged } from '@/lib/client/api';
+import { api, emitDataChanged, useApi } from '@/lib/client/api';
 import { project } from '@/lib/projection/engine';
 import type { ProjectedItem, ProjectionInput } from '@/lib/projection/types';
 import { addDays, addMonths, diffDays, formatShortDate, toUTCDate, type ISODate } from '@/lib/dates';
+import { sumChanges, sumEntries, type LedgerResult, type LedgerRow } from '@/lib/projection/ledger';
 import { centsToDecimalString, formatMoney, toCents, type Cents } from '@/lib/money';
 import { rateToString } from '@/lib/projection/fx';
 import type { ObligationDto } from '@/lib/server/dto';
@@ -23,28 +24,67 @@ interface Column {
   sub: string;
   start: ISODate;
   end: ISODate;
+  /** Columna completamente en el pasado (solo datos reales). */
+  past?: boolean;
+}
+
+/** Columnas hacia atrás cuando se activa "Ver pasado". */
+const PAST_WEEKS = 13;
+const PAST_MONTHS = 3;
+
+function useShowPast(): [boolean, (v: boolean) => void] {
+  const [v, setV] = useState(false);
+  useEffect(() => {
+    try {
+      setV(localStorage.getItem('matrix.showPast') === '1');
+    } catch {
+      /* sin almacenamiento */
+    }
+  }, []);
+  return [
+    v,
+    (next: boolean) => {
+      setV(next);
+      try {
+        localStorage.setItem('matrix.showPast', next ? '1' : '0');
+      } catch {
+        /* sin almacenamiento */
+      }
+    },
+  ];
 }
 
 const MONTHS = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
 
-function buildColumns(view: View, payload: ProjectionPayload): Column[] {
+function buildColumns(view: View, payload: ProjectionPayload, showPast: boolean): Column[] {
   const { weeks } = payload.result;
   if (view === 'weeks') {
-    return weeks.map((w, i) => ({
-      key: w.start,
-      label: i === 0 ? 'Esta semana' : `Sem ${i + 1}`,
-      sub: formatShortDate(w.start),
-      start: w.start,
-      end: w.end,
-    }));
+    const past: Column[] = [];
+    if (showPast) {
+      for (let i = PAST_WEEKS; i >= 1; i--) {
+        const start = addDays(weeks[0].start, -7 * i);
+        past.push({ key: start, label: `Sem −${i}`, sub: formatShortDate(start), start, end: addDays(start, 6), past: true });
+      }
+    }
+    return [
+      ...past,
+      ...weeks.map((w, i) => ({
+        key: w.start,
+        label: i === 0 ? 'Esta semana' : `Sem ${i + 1}`,
+        sub: formatShortDate(w.start),
+        start: w.start,
+        end: w.end,
+      })),
+    ];
   }
-  const first = weeks[0].start.slice(0, 7) + '-01';
+  const current = weeks[0].start.slice(0, 7) + '-01';
+  const first = showPast ? addMonths(current, -PAST_MONTHS, 1) : current;
   const last = weeks[weeks.length - 1].end;
   const cols: Column[] = [];
   for (let m = first; m <= last; m = addMonths(m, 1, 1)) {
     const end = addDays(addMonths(m, 1, 1), -1);
     const d = toUTCDate(m);
-    cols.push({ key: m, label: MONTHS[d.getUTCMonth()], sub: String(d.getUTCFullYear()), start: m, end });
+    cols.push({ key: m, label: MONTHS[d.getUTCMonth()], sub: String(d.getUTCFullYear()), start: m, end, past: end < payload.result.today });
   }
   return cols;
 }
@@ -91,30 +131,53 @@ export default function MatrixPage() {
       return next;
     });
 
-  const columns = useMemo(() => (data ? buildColumns(view, data) : []), [view, data]);
+  const [showPast, setShowPast] = useShowPast();
+  const columns = useMemo(() => (data ? buildColumns(view, data, showPast) : []), [view, data, showPast]);
+  const pastFrom = showPast && columns.length ? columns[0].start : null;
+  const ledgerApi = useApi<LedgerResult>(pastFrom ? `/api/history/ledger?ctx=${encodeURIComponent(app.ctx)}&from=${pastFrom}` : null);
+  const ledger = pastFrom && ledgerApi.data?.from === pastFrom ? ledgerApi.data : null;
 
   const grid = useMemo(() => {
     if (!data) return null;
     const { result } = data;
+    const today = result.today;
+    const cashToday = result.kpis.cashToday;
     const colOf = (date: ISODate) => columns.findIndex((c) => date >= c.start && date <= c.end);
-    const inflows = columns.map(() => 0);
-    const outflows = columns.map(() => 0);
+    const projIn = columns.map(() => 0);
+    const projOut = columns.map(() => 0);
     const rows: { item: ProjectedItem; col: number }[] = [];
     for (const item of result.items) {
       const col = colOf(item.date);
       if (col < 0) continue;
       rows.push({ item, col });
-      if (item.direction === 'IN') inflows[col] += item.amount;
-      else outflows[col] += item.amount;
+      if (item.direction === 'IN') projIn[col] += item.amount;
+      else projOut[col] += item.amount;
     }
-    // Saldo de apertura de la primera columna = caja real hoy (no hay partidas antes de hoy)
+    // Lo realmente cobrado / pagado (columnas pasadas y lo transcurrido de la columna actual)
+    const real = (ledger?.rows ?? []).map((r) => ({ row: r, values: columns.map((c) => (c.start > today ? 0 : sumEntries(r, c.start, c.end))) }));
+    const inflows = columns.map((_, i) => projIn[i] + real.reduce((s, r) => s + (r.row.direction === 'IN' ? r.values[i] : 0), 0));
+    const outflows = columns.map((_, i) => projOut[i] + real.reduce((s, r) => s + (r.row.direction === 'OUT' ? r.values[i] : 0), 0));
+
+    // Saldos: hacia adelante desde la caja de hoy; hacia atrás, caja de hoy menos lo ocurrido después.
     const opening: number[] = [];
     const closing: number[] = [];
-    let running = result.kpis.cashToday;
-    columns.forEach((_, i) => {
-      opening.push(running);
-      running += inflows[i] - outflows[i];
-      closing.push(running);
+    const other: number[] = [];
+    let running = cashToday;
+    columns.forEach((c, i) => {
+      if (!ledger || c.start > today) {
+        opening.push(running);
+        running += projIn[i] - projOut[i];
+        closing.push(running);
+        other.push(0);
+        return;
+      }
+      const open = cashToday - sumChanges(ledger.changes, c.start, today);
+      const close = c.end < today ? cashToday - sumChanges(ledger.changes, addDays(c.end, 1), today) : cashToday + projIn[i] - projOut[i];
+      opening.push(open);
+      closing.push(close);
+      // Aperturas, ajustes de conciliación, etc.: mueven la caja pero no son cobros ni pagos
+      other.push(close - open - (inflows[i] - outflows[i]));
+      running = close;
     });
     return {
       rows,
@@ -122,13 +185,18 @@ export default function MatrixPage() {
       outflows,
       opening,
       closing,
+      other,
+      hasOther: other.some((v) => v !== 0),
       inRows: rows.filter((r) => r.item.direction === 'IN'),
       outRows: rows.filter((r) => r.item.direction === 'OUT'),
+      realIn: real.filter((r) => r.row.direction === 'IN'),
+      realOut: real.filter((r) => r.row.direction === 'OUT'),
     };
-  }, [data, columns]);
+  }, [data, columns, ledger]);
 
   if (error) return <ErrorBox message={error} />;
-  if (loading || !data || !grid) return <Loading />;
+  if (pastFrom && ledgerApi.error) return <ErrorBox message={ledgerApi.error} />;
+  if (loading || !data || !grid || (pastFrom && !ledger)) return <Loading />;
 
   const { result, input } = data;
   const currency = result.currency;
@@ -349,7 +417,7 @@ export default function MatrixPage() {
             </div>
           </td>
           {columns.map((c, i) => (
-            <td key={c.key} className="px-1 py-1 text-right">
+            <td key={c.key} className={cn('px-1 py-1 text-right', pastCell(c))}>
               {i === col ? (
                 editing?.key === editKey ? (
                   <input
@@ -379,7 +447,7 @@ export default function MatrixPage() {
                     {formatMoney(item.amount, currency).replace(currency, '').trim()}
                   </button>
                 )
-              ) : (
+              ) : c.end < result.today ? null : (
                 <button
                   onClick={() => moveTo(item, i)}
                   className="h-7 w-full rounded text-[10px] text-transparent hover:bg-sky-50 hover:text-sky-600 dark:hover:bg-sky-500/10"
@@ -394,6 +462,44 @@ export default function MatrixPage() {
       );
     });
 
+  const pastCell = (c: Column) => c.past && 'bg-slate-50/70 dark:bg-slate-800/30';
+
+  const renderRealRows = (rows: { row: LedgerRow; values: number[] }[]) =>
+    rows.map(({ row, values }) => {
+      const e = app.entityById.get(row.entityId);
+      return (
+        <tr key={`real:${row.key}`} className="border-t border-slate-100 dark:border-slate-800/70">
+          <td className={cn(stickyCell, 'max-w-[18rem] py-1.5 pl-8 pr-3')}>
+            <div className="flex items-center gap-2">
+              {consolidated && e && <EntityDot color={e.color} />}
+              {row.kind === 'CARD_PAYMENT' && <CreditCard className="h-3.5 w-3.5 shrink-0 text-slate-400" />}
+              <span className="truncate text-sm text-slate-600 dark:text-slate-300" title={row.description}>
+                {row.description}
+              </span>
+            </div>
+            <div className="flex flex-wrap gap-1 pt-0.5">
+              <Badge>{row.direction === 'IN' ? 'Cobrado' : 'Pagado'}</Badge>
+              {row.recurring && <Badge tone="blue">Recurrente</Badge>}
+              {row.kind === 'TRANSFER' && <Badge>Transferencia</Badge>}
+            </div>
+          </td>
+          {columns.map((c, i) => (
+            <td
+              key={c.key}
+              className={cn(
+                'px-3 py-1 text-right text-sm tabular-nums',
+                pastCell(c),
+                row.direction === 'IN' ? 'text-emerald-600/90 dark:text-emerald-400/90' : 'text-rose-600/90 dark:text-rose-400/90',
+              )}
+              title={values[i] ? `${row.direction === 'IN' ? 'Cobrado' : 'Pagado'} (real)` : undefined}
+            >
+              {values[i] ? formatMoney(values[i], currency).replace(currency, '').trim() : ''}
+            </td>
+          ))}
+        </tr>
+      );
+    });
+
   const amountRow = (label: string, values: number[], opts: { bold?: boolean; tone?: 'in' | 'out'; balance?: boolean }) => (
     <tr className={cn('border-t border-slate-200 dark:border-slate-800', opts.balance && 'bg-slate-50/80 dark:bg-slate-800/40')}>
       <td className={cn(stickyCell, 'px-3 py-2 text-sm', opts.bold && 'font-semibold', opts.balance && 'bg-slate-50 dark:bg-slate-800')}>{label}</td>
@@ -402,6 +508,7 @@ export default function MatrixPage() {
           key={columns[i].key}
           className={cn(
             'px-3 py-2 text-right text-sm tabular-nums',
+            !opts.balance && pastCell(columns[i]),
             opts.bold && 'font-semibold',
             opts.tone === 'in' && 'text-emerald-700 dark:text-emerald-400',
             opts.tone === 'out' && 'text-rose-700 dark:text-rose-400',
@@ -436,7 +543,7 @@ export default function MatrixPage() {
       {values.map((v, i) => (
         <td
           key={columns[i].key}
-          className={cn('px-3 py-2 text-right text-sm font-semibold tabular-nums', dir === 'IN' ? 'text-emerald-700 dark:text-emerald-400' : 'text-rose-700 dark:text-rose-400')}
+          className={cn('px-3 py-2 text-right text-sm font-semibold tabular-nums', pastCell(columns[i]), dir === 'IN' ? 'text-emerald-700 dark:text-emerald-400' : 'text-rose-700 dark:text-rose-400')}
         >
           {v === 0 ? '—' : formatMoney(v, currency).replace(currency, '').trim()}
         </td>
@@ -460,6 +567,11 @@ export default function MatrixPage() {
               <RotateCcw className="h-3.5 w-3.5" /> Reiniciar simulación
             </Button>
           )}
+          <Toggle
+            checked={showPast}
+            onChange={setShowPast}
+            label={<span className="text-xs text-slate-500">Ver {view === 'weeks' ? `${PAST_WEEKS} semanas` : `${PAST_MONTHS} meses`} atrás</span>}
+          />
           <Tabs<View>
             tabs={[
               { id: 'weeks', label: 'Semanas' },
@@ -478,24 +590,31 @@ export default function MatrixPage() {
               <tr className="bg-slate-50 dark:bg-slate-800/60">
                 <th className={cn('th sticky left-0 z-20 min-w-[16rem] bg-slate-50 dark:bg-slate-800')}>Concepto</th>
                 {columns.map((c) => (
-                  <th key={c.key} className="th min-w-[7.5rem] text-right">
+                  <th
+                    key={c.key}
+                    className={cn('th min-w-[7.5rem] text-right', c.past && 'bg-slate-100 dark:bg-slate-800')}
+                    title={c.past ? 'Real: lo efectivamente cobrado y pagado' : undefined}
+                  >
                     <div>{c.label}</div>
-                    <div className="font-normal normal-case text-slate-400">{c.sub}</div>
+                    <div className="font-normal normal-case text-slate-400">{c.past ? `${c.sub} · real` : c.sub}</div>
                   </th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {amountRow('Saldo inicial', grid.opening, { bold: true, balance: true })}
-              {groupHeader('IN', grid.inflows, grid.inRows.length)}
+              {groupHeader('IN', grid.inflows, grid.inRows.length + grid.realIn.length)}
+              {open.IN && renderRealRows(grid.realIn)}
               {open.IN && renderItemRows(grid.inRows)}
-              {groupHeader('OUT', grid.outflows, grid.outRows.length)}
+              {groupHeader('OUT', grid.outflows, grid.outRows.length + grid.realOut.length)}
+              {open.OUT && renderRealRows(grid.realOut)}
               {open.OUT && renderItemRows(grid.outRows)}
               {amountRow(
                 'Flujo neto',
                 grid.inflows.map((v, i) => v - grid.outflows[i]),
                 {},
               )}
+              {grid.hasOther && amountRow('Otros movimientos (aperturas, ajustes)', grid.other, {})}
               {amountRow('Saldo de cierre', grid.closing, { bold: true, balance: true })}
             </tbody>
           </table>
@@ -528,6 +647,8 @@ export default function MatrixPage() {
       )}
 
       <p className="text-xs text-slate-500">
+        {showPast &&
+          'Las columnas sombreadas muestran lo realmente cobrado y pagado en cuentas líquidas (bancos, caja); en la columna actual se suma lo ya registrado más lo pendiente. '}
         Las partidas vencidas se muestran en la semana actual. Los pagos de tarjeta agrupan sus consumos en la fecha límite de pago. Días hasta la última columna:{' '}
         {diffDays(columns[columns.length - 1].end, result.today)}.
       </p>

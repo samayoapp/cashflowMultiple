@@ -5,16 +5,17 @@ import { requireUser } from '@/lib/server/auth';
 import { resolveContext } from '@/lib/server/scope';
 import { getSettings } from '@/lib/server/projection-data';
 import { cents, dbDate, isoOf, isoOrNull } from '@/lib/server/serialize';
-import { addDays, todayInTz } from '@/lib/dates';
+import { addDays, isISODate, todayInTz } from '@/lib/dates';
 import { occurrenceKey, pendingOccurrences } from '@/lib/projection/recurrence';
 import type { UpcomingOccurrenceDto } from '@/lib/server/dto';
 
 export const dynamic = 'force-dynamic';
 
 /**
- * Próximas ocurrencias virtuales de recurrencias activas (aún no materializadas como CxC/CxP),
- * desde hoy hasta `days` días. Se muestran junto a las CxC/CxP reales.
- * ?direction=IN|OUT  ?days=1..366 (90 por defecto)  ?q=texto
+ * Ocurrencias virtuales de recurrencias activas (aún no materializadas como CxC/CxP),
+ * desde `from` (hoy por defecto; puede ser pasado, máx. 2 años atrás) hasta `days` días después de hoy.
+ * Las pasadas salen con `past: true`: son fechas que nunca se registraron (cobro/pago sin anotar).
+ * ?direction=IN|OUT  ?days=1..366 (90 por defecto)  ?from=YYYY-MM-DD  ?q=texto
  */
 export const GET = route(async (req) => {
   const user = await requireUser();
@@ -27,6 +28,9 @@ export const GET = route(async (req) => {
   const settings = await getSettings();
   const today = todayInTz(settings.timezone);
   const to = addDays(today, days);
+  const fromParam = sp.get('from');
+  const minFrom = addDays(today, -731);
+  const from = isISODate(fromParam) && fromParam < today ? (fromParam < minFrom ? minFrom : fromParam) : today;
 
   const where: Prisma.RecurringRuleWhereInput = {
     entityId: { in: ctx.entityIds },
@@ -52,7 +56,7 @@ export const GET = route(async (req) => {
   const done = await prisma.obligation.findMany({
     where: {
       recurrenceId: { in: rules.map((r) => r.id) },
-      occurrenceDate: { gte: dbDate(today), lte: dbDate(to) },
+      occurrenceDate: { gte: dbDate(from), lte: dbDate(to) },
     },
     select: { recurrenceId: true, occurrenceDate: true },
   });
@@ -74,7 +78,7 @@ export const GET = route(async (req) => {
   }));
 
   return ok<UpcomingOccurrenceDto[]>(
-    pendingOccurrences(engineRules, materialized, today, to).map(({ rule, date }) => ({
+    pendingOccurrences(engineRules, materialized, from, to).map(({ rule, date }) => ({
       key: `${rule.id}:${date}`,
       ruleId: rule.id,
       entityId: rule.entityId,
@@ -86,6 +90,7 @@ export const GET = route(async (req) => {
       priority: rule.priority,
       counterparty: rule.counterparty,
       category: rule.category,
+      past: date < today,
     })),
   );
 });

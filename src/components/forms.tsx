@@ -824,11 +824,14 @@ export function PaymentModal({
   onClose,
   target,
   full,
+  defaultDate,
 }: {
   open: boolean;
   onClose: () => void;
   target: { id: string; entityId: string; direction: 'IN' | 'OUT'; description: string; remaining: Cents } | null;
   full?: boolean;
+  /** Fecha propuesta (p. ej. la de una ocurrencia pasada); por defecto, hoy. */
+  defaultDate?: string;
 }) {
   const app = useApp();
   const { loading, error, run, setError } = useSubmit();
@@ -849,9 +852,9 @@ export function PaymentModal({
     if (!open || !target) return;
     setError(null);
     setAmount(centsInput(target.remaining));
-    setDate(app.today);
+    setDate(defaultDate && defaultDate < app.today ? defaultDate : app.today);
     setInstallments(1);
-  }, [open, target, app.today, setError]);
+  }, [open, target, app.today, defaultDate, setError]);
 
   useEffect(() => {
     if (payingWithCard && target) setAmount(centsInput(target.remaining));
