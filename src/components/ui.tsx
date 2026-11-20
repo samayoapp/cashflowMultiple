@@ -2,8 +2,8 @@
 
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
-import { Loader2, X } from 'lucide-react';
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { AlertTriangle, HelpCircle, Loader2, X } from 'lucide-react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { formatMoney } from '@/lib/money';
 import { tableTotals, type ColumnValue } from '@/lib/totals';
 import { createPortal } from 'react-dom';
@@ -244,6 +244,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <ToastCtx.Provider value={push}>
       {children}
+      <ConfirmHost />
       <div className="pointer-events-none fixed bottom-4 right-4 z-[60] flex flex-col gap-2">
         {toasts.map((t) => (
           <div
@@ -319,5 +320,104 @@ export function TableTotals<T>({
         );
       })}
     </tfoot>
+  );
+}
+
+// ---- Confirmaciones (reemplazan confirm() del navegador) ----
+export interface ConfirmOptions {
+  title?: string;
+  /** Texto (los saltos de línea se respetan) o contenido. */
+  message: ReactNode;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  /** danger: acción destructiva (botón rojo, el foco queda en "Volver"). */
+  tone?: 'danger' | 'primary';
+}
+
+type PendingConfirm = ConfirmOptions & { resolve: (ok: boolean) => void };
+let openConfirm: ((o: ConfirmOptions) => Promise<boolean>) | null = null;
+
+/**
+ * Diálogo de confirmación con el estilo de la app, centrado en pantalla.
+ * Uso: `if (!(await confirmDialog({ title, message, tone: 'danger' }))) return;`
+ * Funciona también encima de otro popup abierto.
+ */
+export function confirmDialog(o: ConfirmOptions | string): Promise<boolean> {
+  const opts = typeof o === 'string' ? { message: o } : o;
+  return openConfirm ? openConfirm(opts) : Promise.resolve(false);
+}
+
+function ConfirmHost() {
+  const [pending, setPending] = useState<PendingConfirm | null>(null);
+  const pendingRef = useRef<PendingConfirm | null>(null);
+  pendingRef.current = pending;
+
+  useEffect(() => {
+    openConfirm = (o) =>
+      new Promise<boolean>((resolve) => {
+        pendingRef.current?.resolve(false); // uno a la vez
+        setPending({ ...o, resolve });
+      });
+    return () => {
+      openConfirm = null;
+    };
+  }, []);
+
+  const close = useCallback((ok: boolean) => {
+    pendingRef.current?.resolve(ok);
+    setPending(null);
+  }, []);
+
+  useEffect(() => {
+    if (!pending) return;
+    // En captura sobre document: Escape cierra solo este diálogo, no el popup que esté debajo
+    const h = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      close(false);
+    };
+    document.addEventListener('keydown', h, true);
+    return () => document.removeEventListener('keydown', h, true);
+  }, [pending, close]);
+
+  if (!pending || typeof document === 'undefined') return null;
+  const danger = pending.tone !== 'primary';
+  const Icon = danger ? AlertTriangle : HelpCircle;
+  return createPortal(
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm" onMouseDown={() => close(false)}>
+      <div
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="cf-confirm-title"
+        onMouseDown={(e) => e.stopPropagation()}
+        className="animate-fade-in w-full max-w-md rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900"
+      >
+        <div className="flex gap-3 px-5 pb-4 pt-5">
+          <div
+            className={cn(
+              'flex h-9 w-9 shrink-0 items-center justify-center rounded-full',
+              danger ? 'bg-rose-100 text-rose-600 dark:bg-rose-950/60 dark:text-rose-400' : 'bg-brand-50 text-brand-600 dark:bg-brand-900/40 dark:text-brand-300',
+            )}
+          >
+            <Icon className="h-5 w-5" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 id="cf-confirm-title" className="text-base font-semibold">
+              {pending.title ?? '¿Confirmar?'}
+            </h2>
+            <div className="mt-1.5 whitespace-pre-line text-sm text-slate-600 dark:text-slate-300">{pending.message}</div>
+          </div>
+        </div>
+        <div className="flex justify-end gap-2 border-t border-slate-200 px-5 py-3 dark:border-slate-800">
+          <Button onClick={() => close(false)} autoFocus={danger}>
+            {pending.cancelLabel ?? 'Volver'}
+          </Button>
+          <Button variant={danger ? 'danger' : 'primary'} onClick={() => close(true)} autoFocus={!danger}>
+            {pending.confirmLabel ?? 'Confirmar'}
+          </Button>
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }

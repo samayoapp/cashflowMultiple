@@ -8,7 +8,7 @@ import { centsToDecimalString, formatMoney, toCents, type Cents } from '@/lib/mo
 import { addDays, formatShortDate } from '@/lib/dates';
 import { dueDateFor, nextDayOnOrAfter, statementCloseFor } from '@/lib/projection/card-cycle';
 import { useApp } from './AppContext';
-import { Button, cn, ErrorBox, Field, Modal, Toggle, useToast } from './ui';
+import { Button, cn, confirmDialog, ErrorBox, Field, Modal, Toggle, useToast } from './ui';
 import { CardImpactPreview, INSTALLMENT_OPTIONS, isCard, liquidAccounts } from './cards';
 
 const CURRENCIES = ['HNL', 'USD', 'EUR'];
@@ -613,7 +613,15 @@ export function ObligationFormModal({
     if (!obligation) return;
     const cur = app.entityById.get(obligation.entityId)?.currency ?? 'HNL';
     const what = isIn ? 'cobro' : 'pago';
-    if (!confirm(`¿Deshacer el ${what} de ${formatMoney(p.amount, cur)} del ${p.date} (${p.accountName})? Se quita también del saldo de la cuenta.`)) return;
+    if (
+      !(await confirmDialog({
+        title: `Deshacer ${what}`,
+        message: `¿Deshacer el ${what} de ${formatMoney(p.amount, cur)} del ${p.date} (${p.accountName})? Se quita también del saldo de la cuenta.`,
+        confirmLabel: `Deshacer ${what}`,
+        tone: 'danger',
+      }))
+    )
+      return;
     setUndoing(p.id);
     try {
       await api(`/api/obligations/${obligation.id}/payments/${p.id}`, { method: 'DELETE' });
@@ -629,7 +637,15 @@ export function ObligationFormModal({
 
   async function remove() {
     if (!obligation) return;
-    if (!confirm(`¿Eliminar definitivamente "${obligation.description}"? No se puede deshacer.`)) return;
+    if (
+      !(await confirmDialog({
+        title: 'Eliminar partida',
+        message: `¿Eliminar definitivamente "${obligation.description}"? No se puede deshacer.`,
+        confirmLabel: 'Eliminar',
+        tone: 'danger',
+      }))
+    )
+      return;
     const ok = await run(() => api(`/api/obligations/${obligation.id}`, { method: 'DELETE' }), 'Partida eliminada');
     if (ok) onClose();
   }
@@ -1023,10 +1039,14 @@ export function RescheduleModal({
 /** Alta y edición de recurrencias. Con `rule` edita (entidad y tipo no cambian). */
 /** Confirmación para eliminar una recurrencia completa (las fechas ya pagadas se conservan). */
 export async function confirmDeleteRecurrence(description: string): Promise<boolean> {
-  return confirm(
-    `¿Eliminar la recurrencia "${description}"?\n\nSe borran todas sus fechas futuras y las pendientes. ` +
+  return confirmDialog({
+    title: 'Eliminar recurrencia',
+    message:
+      `¿Eliminar la recurrencia "${description}"?\n\nSe borran todas sus fechas futuras y las pendientes. ` +
       'Las que ya tienen cobros/pagos se conservan como partidas normales. No se puede deshacer.',
-  );
+    confirmLabel: 'Eliminar',
+    tone: 'danger',
+  });
 }
 
 export function recurrenceDeletedMsg(r: { deleted: number; kept: number }): string {
@@ -1693,7 +1713,15 @@ export function InterUnitEditModal({ open, onClose, transferId }: { open: boolea
   }
 
   async function remove() {
-    if (!confirm(`¿Eliminar definitivamente este ${isReimb ? 'reembolso' : 'registro de devolución'}? Se borra la CxP de ${from?.name} y la CxC de ${to?.name}. No se puede deshacer.`)) return;
+    if (
+      !(await confirmDialog({
+        title: isReimb ? 'Eliminar reembolso' : 'Eliminar devolución',
+        message: `¿Eliminar definitivamente este ${isReimb ? 'reembolso' : 'registro de devolución'}? Se borra la CxP de ${from?.name} y la CxC de ${to?.name}. No se puede deshacer.`,
+        confirmLabel: 'Eliminar',
+        tone: 'danger',
+      }))
+    )
+      return;
     try {
       await api(`/api/transfers/${t!.id}`, { method: 'DELETE' });
       toast(isReimb ? 'Reembolso eliminado' : 'Devolución eliminada');

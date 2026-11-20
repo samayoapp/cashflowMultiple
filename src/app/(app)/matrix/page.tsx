@@ -3,7 +3,7 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import { ChevronDown, ChevronRight, CreditCard, Eye, EyeOff, FlaskConical, Plus, RotateCcw } from 'lucide-react';
 import { useApp } from '@/components/AppContext';
-import { Badge, Button, Card, cn, ErrorBox, Loading, Tabs, Toggle, useToast } from '@/components/ui';
+import { Badge, Button, Card, cn, confirmDialog, ErrorBox, Loading, Tabs, Toggle, useToast } from '@/components/ui';
 import { EntityDot } from '@/components/AppShell';
 import { ObligationFormModal, parseMoneyInput } from '@/components/forms';
 import { CardPaymentModal, type CardPaymentTarget } from '@/components/cards';
@@ -289,7 +289,15 @@ export default function MatrixPage() {
   }
 
   async function resetScenario() {
-    if (!confirm('¿Quitar todos los ajustes de la simulación? Las partidas hipotéticas se conservan.')) return;
+    if (
+      !(await confirmDialog({
+        title: 'Reiniciar simulación',
+        message: '¿Quitar todos los ajustes de la simulación? Las partidas hipotéticas se conservan.',
+        confirmLabel: 'Quitar ajustes',
+        tone: 'danger',
+      }))
+    )
+      return;
     await persist(() => api('/api/scenario/overrides', { method: 'DELETE' }), 'Simulación reiniciada');
   }
 

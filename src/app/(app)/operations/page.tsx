@@ -3,7 +3,7 @@
 import { Fragment, useMemo, useState } from 'react';
 import { ArrowLeftRight, Ban, Building2, CalendarClock, CheckCircle2, ChevronDown, ChevronRight, Coins, CreditCard, Pencil, Plus, Repeat, Search, Send, SkipForward, Trash2, X } from 'lucide-react';
 import { useApp } from '@/components/AppContext';
-import { Badge, Button, Card, cn, EmptyState, ErrorBox, Loading, TableTotals, Tabs, Toggle, useToast } from '@/components/ui';
+import { Badge, Button, Card, cn, confirmDialog, EmptyState, ErrorBox, Loading, TableTotals, Tabs, Toggle, useToast } from '@/components/ui';
 import { EntityDot } from '@/components/AppShell';
 import {
   ExecuteTransferModal,
@@ -215,7 +215,12 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
   async function onUpcoming(u: UpcomingOccurrenceDto, action: 'pay' | 'partial' | 'move' | 'edit' | 'skip') {
     if (
       action === 'skip' &&
-      !confirm(`¿Omitir la ocurrencia del ${formatShortDate(u.date)} de "${u.description}"? Las demás fechas de la recurrencia no cambian.`)
+      !(await confirmDialog({
+        title: 'Omitir fecha',
+        message: `¿Omitir la ocurrencia del ${formatShortDate(u.date)} de "${u.description}"? Las demás fechas de la recurrencia no cambian.`,
+        confirmLabel: 'Omitir',
+        tone: 'danger',
+      }))
     )
       return;
     const ob = await materialize(u);
@@ -248,7 +253,15 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
     const msg = o.recurrenceId
       ? `¿Omitir la fecha ${o.expectedDate} de "${o.description}"? Las demás fechas de la recurrencia no cambian.`
       : `¿Cancelar "${o.description}"? Dejará de proyectarse y queda en el historial como cancelada.`;
-    if (!confirm(msg)) return;
+    if (
+      !(await confirmDialog({
+        title: o.recurrenceId ? 'Omitir fecha' : 'Cancelar partida',
+        message: msg,
+        confirmLabel: o.recurrenceId ? 'Omitir' : 'Cancelar partida',
+        tone: 'danger',
+      }))
+    )
+      return;
     try {
       await api(`/api/obligations/${o.id}`, { method: 'PATCH', body: { status: 'CANCELLED' } });
       toast(o.recurrenceId ? 'Fecha omitida' : 'Partida cancelada');
@@ -260,7 +273,15 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
 
   async function cancelLoan(o: ObligationDto) {
     if (!o.interUnit) return;
-    if (!confirm(`¿Cancelar el saldo pendiente de "${o.description}"? Se cancela en ambas unidades; los abonos ya hechos se conservan.`)) return;
+    if (
+      !(await confirmDialog({
+        title: 'Cancelar saldo pendiente',
+        message: `¿Cancelar el saldo pendiente de "${o.description}"? Se cancela en ambas unidades; los abonos ya hechos se conservan.`,
+        confirmLabel: 'Cancelar saldo',
+        tone: 'danger',
+      }))
+    )
+      return;
     try {
       await api(`/api/transfers/${o.interUnit.transferId}`, { body: { action: 'cancel' } });
       toast(o.interUnit?.kind === 'REIMBURSEMENT' ? 'Saldo del reembolso cancelado' : 'Saldo del préstamo cancelado');
@@ -271,7 +292,15 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
   }
 
   async function remove(o: ObligationDto) {
-    if (!confirm(`¿Eliminar definitivamente "${o.description}"? No queda en el historial y no se puede deshacer.`)) return;
+    if (
+      !(await confirmDialog({
+        title: 'Eliminar partida',
+        message: `¿Eliminar definitivamente "${o.description}"? No queda en el historial y no se puede deshacer.`,
+        confirmLabel: 'Eliminar',
+        tone: 'danger',
+      }))
+    )
+      return;
     try {
       await api(`/api/obligations/${o.id}`, { method: 'DELETE' });
       toast('Partida eliminada');
@@ -782,7 +811,15 @@ function TransfersTab() {
       : t.kind === 'LOAN' && t.repayment
         ? '¿Cancelar este préstamo? Su devolución programada también se cancela.'
         : '¿Cancelar esta transferencia planificada?';
-    if (!confirm(msg)) return;
+    if (
+      !(await confirmDialog({
+        title: t.repaymentOfId || t.isReimbursement ? 'Cancelar saldo pendiente' : 'Cancelar transferencia',
+        message: msg,
+        confirmLabel: t.repaymentOfId || t.isReimbursement ? 'Cancelar saldo' : 'Cancelar transferencia',
+        tone: 'danger',
+      }))
+    )
+      return;
     try {
       await api(`/api/transfers/${t.id}`, { body: { action: 'cancel' } });
       toast('Transferencia cancelada');
@@ -798,6 +835,7 @@ function TransfersTab() {
     const label = t.repaymentOfId ? 'Devolución de préstamo' : t.isReimbursement ? 'Reembolso' : KIND[t.kind];
     const moved = t.paidFrom > 0 || t.paidTo > 0;
     const lines = [`¿Eliminar definitivamente "${label}${t.description ? `: ${t.description}` : ''}" (${from?.name} → ${to?.name})?`];
+    const title = moved ? 'Eliminar y revertir transferencia' : 'Eliminar transferencia';
     if (moved) {
       lines.push(
         '',
@@ -809,7 +847,7 @@ function TransfersTab() {
     }
     if (t.kind === 'LOAN' && !t.repaymentOfId && t.repayment) lines.push('', 'También se elimina su devolución programada.');
     lines.push('', 'No se puede deshacer.');
-    if (!confirm(lines.join('\n'))) return;
+    if (!(await confirmDialog({ title, message: lines.join('\n'), confirmLabel: moved ? 'Eliminar y revertir' : 'Eliminar', tone: 'danger' }))) return;
     try {
       await api(`/api/transfers/${t.id}`, { method: 'DELETE' });
       toast(moved ? 'Transferencia eliminada y caja revertida' : 'Transferencia eliminada');
@@ -820,7 +858,15 @@ function TransfersTab() {
   }
 
   async function voidInternal(t: InternalTransferRow) {
-    if (!confirm('¿Anular esta transferencia entre cuentas? Se revierten los saldos de ambas cuentas.')) return;
+    if (
+      !(await confirmDialog({
+        title: 'Anular transferencia',
+        message: `¿Anular la transferencia ${t.fromAccountName} → ${t.toAccountName}? Se revierten los saldos de ambas cuentas.`,
+        confirmLabel: 'Anular',
+        tone: 'danger',
+      }))
+    )
+      return;
     try {
       await api(`/api/transfers/internal/${t.id}`, { body: { action: 'void' } });
       toast('Transferencia anulada');

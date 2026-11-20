@@ -17,7 +17,7 @@ import {
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { useApp } from '@/components/AppContext';
-import { Badge, Button, Card, cn, EmptyState, ErrorBox, Field, Loading, Modal, TableTotals, Tabs, Toggle, useToast } from '@/components/ui';
+import { Badge, Button, Card, cn, confirmDialog, EmptyState, ErrorBox, Field, Loading, Modal, TableTotals, Tabs, Toggle, useToast } from '@/components/ui';
 import { EntityDot } from '@/components/AppShell';
 import { AccountFormModal, centsInput, EntityFormModal, parseMoneyInput } from '@/components/forms';
 import { api, emitDataChanged, useApi } from '@/lib/client/api';
@@ -267,7 +267,16 @@ export function UnitTab() {
   }
 
   async function rotate(u: EntityDto) {
-    if (u.webhookEnabled && !confirm('Se generará un token nuevo y el anterior dejará de funcionar. ¿Continuar?')) return;
+    if (
+      u.webhookEnabled &&
+      !(await confirmDialog({
+        title: 'Rotar token del webhook',
+        message: 'Se generará un token nuevo y el anterior dejará de funcionar. ¿Continuar?',
+        confirmLabel: 'Generar token nuevo',
+        tone: 'danger',
+      }))
+    )
+      return;
     try {
       const r = await api<{ token: string; endpoint: string }>(`/api/entities/${u.id}/webhook-token`, { method: 'POST' });
       setToken({ ...r, entity: u.name });
@@ -323,10 +332,17 @@ export function UnitTab() {
             </Button>
             {e.webhookEnabled && (
               <Button
-                onClick={() =>
-                  confirm('¿Desactivar el webhook?') &&
-                  act(() => api(`/api/entities/${e.id}/webhook-token`, { method: 'DELETE' }), 'Webhook desactivado')
-                }
+                onClick={async () => {
+                  if (
+                    await confirmDialog({
+                      title: 'Desactivar webhook',
+                      message: `¿Desactivar el webhook de "${e.name}"? Las integraciones que lo usan dejarán de enviar datos.`,
+                      confirmLabel: 'Desactivar',
+                      tone: 'danger',
+                    })
+                  )
+                    void act(() => api(`/api/entities/${e.id}/webhook-token`, { method: 'DELETE' }), 'Webhook desactivado');
+                }}
               >
                 <KeyRound className="h-4 w-4 text-rose-500" /> Desactivar
               </Button>
@@ -441,13 +457,29 @@ export function EntitiesTab() {
     }
   }
 
-  function makeDefault(e: EntityDto) {
-    if (!confirm(`¿Definir "${e.name}" como unidad de negocio Base? Aparecerá primero en el menú y será la unidad de negocio por defecto al registrar.`)) return;
+  async function makeDefault(e: EntityDto) {
+    if (
+      !(await confirmDialog({
+        title: 'Unidad de negocio Base',
+        message: `¿Definir "${e.name}" como unidad de negocio Base? Aparecerá primero en el menú y será la unidad de negocio por defecto al registrar.`,
+        confirmLabel: 'Definir como Base',
+        tone: 'primary',
+      }))
+    )
+      return;
     void act(() => api(`/api/entities/${e.id}/make-default`, { method: 'POST' }), `"${e.name}" es ahora la unidad de negocio Base`);
   }
 
   async function remove(e: EntityDto) {
-    if (!confirm(`¿Eliminar definitivamente "${e.name}"? Solo es posible si no tiene ningún dato registrado. Esta acción no se puede deshacer.`)) return;
+    if (
+      !(await confirmDialog({
+        title: 'Eliminar unidad de negocio',
+        message: `¿Eliminar definitivamente "${e.name}"? Solo es posible si no tiene ningún dato registrado. Esta acción no se puede deshacer.`,
+        confirmLabel: 'Eliminar',
+        tone: 'danger',
+      }))
+    )
+      return;
     const done = await act(() => api(`/api/entities/${e.id}`, { method: 'DELETE' }), `Unidad de negocio "${e.name}" eliminada`);
     if (done && app.ctx === e.id) app.setCtx('all');
   }
@@ -660,7 +692,17 @@ export function RatesTab() {
                   <td className="td">{r.effectiveDate}</td>
                   <td className="td text-right">
                     {app.isAdmin && (
-                      <Button size="sm" variant="ghost" onClick={() => confirm('¿Eliminar esta tasa?') && act(() => api(`/api/rates/${r.id}`, { method: 'DELETE' }), 'Tasa eliminada')}>
+                      <Button size="sm" variant="ghost" onClick={async () => {
+                          if (
+                            await confirmDialog({
+                              title: 'Eliminar tasa',
+                              message: `¿Eliminar la tasa ${r.fromCurrency}/${r.toCurrency} vigente desde ${r.effectiveDate}?`,
+                              confirmLabel: 'Eliminar',
+                              tone: 'danger',
+                            })
+                          )
+                            void act(() => api(`/api/rates/${r.id}`, { method: 'DELETE' }), 'Tasa eliminada');
+                        }}>
                         <Trash2 className="h-4 w-4 text-rose-500" />
                       </Button>
                     )}
