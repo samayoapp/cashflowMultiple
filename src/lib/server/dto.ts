@@ -91,8 +91,10 @@ export function obligationDto(o: ObligationWith) {
       amount: cents(p.amount),
       date: isoOf(p.date),
       accountId: p.accountId,
-      accountName: p.account.name,
-      byCard: p.account.type === 'CREDIT_CARD',
+      accountName: p.account?.name ?? 'Registro histórico (sin caja)',
+      byCard: p.account?.type === 'CREDIT_CARD',
+      /** Registro histórico: no movió caja. */
+      historical: p.isHistorical,
       note: p.note,
     })),
   };

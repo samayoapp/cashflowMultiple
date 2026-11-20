@@ -337,9 +337,15 @@ export async function createLoanRepaymentTx(
  */
 export async function payTransfer(args: {
   transferId: string;
-  fromAccountId: string;
-  toAccountId: string;
+  /** Requeridas salvo en registros históricos. */
+  fromAccountId?: string | null;
+  toAccountId?: string | null;
   date: ISODate;
+  /**
+   * Registro HISTÓRICO: baja el saldo de ambas partidas (y puede cerrar la transferencia)
+   * sin cuentas ni movimientos de caja, porque ese dinero ya está reflejado en los saldos.
+   */
+  historical?: boolean;
   /** Abono: lo que sale de la unidad origen (su moneda). */
   amountFrom?: Cents;
   /** Abono con monedas distintas: lo que entra al destino. Por defecto, proporcional. */
@@ -362,18 +368,26 @@ export async function payTransfer(args: {
       throw badRequest('Solo las devoluciones de préstamo y los reembolsos aceptan abonos');
     }
 
-    const [fromAcc, toAcc] = await Promise.all([
-      tx.account.findUnique({ where: { id: args.fromAccountId } }),
-      tx.account.findUnique({ where: { id: args.toAccountId } }),
-    ]);
-    if (!fromAcc || fromAcc.entityId !== t.fromEntityId) throw badRequest('Cuenta de origen inválida');
-    if (!toAcc || toAcc.entityId !== t.toEntityId) throw badRequest('Cuenta de destino inválida');
-    if (fromAcc.type === 'CREDIT_CARD' || toAcc.type === 'CREDIT_CARD') {
-      throw badRequest('Las transferencias entre entidades usan cuentas líquidas, no tarjetas');
+    const historical = Boolean(args.historical);
+    let fromAcc: { id: string } | null = null;
+    let toAcc: { id: string } | null = null;
+    if (!historical) {
+      if (!args.fromAccountId || !args.toAccountId) throw badRequest('Elige las cuentas de origen y destino');
+      const [f, d] = await Promise.all([
+        tx.account.findUnique({ where: { id: args.fromAccountId } }),
+        tx.account.findUnique({ where: { id: args.toAccountId } }),
+      ]);
+      if (!f || f.entityId !== t.fromEntityId) throw badRequest('Cuenta de origen inválida');
+      if (!d || d.entityId !== t.toEntityId) throw badRequest('Cuenta de destino inválida');
+      if (f.type === 'CREDIT_CARD' || d.type === 'CREDIT_CARD') {
+        throw badRequest('Las transferencias entre entidades usan cuentas líquidas, no tarjetas');
+      }
+      if (f.archivedAt || d.archivedAt) throw badRequest('No se puede usar una cuenta archivada');
+      await assertOnOrAfterOpening(tx, f, args.date);
+      await assertOnOrAfterOpening(tx, d, args.date);
+      fromAcc = f;
+      toAcc = d;
     }
-    if (fromAcc.archivedAt || toAcc.archivedAt) throw badRequest('No se puede usar una cuenta archivada');
-    await assertOnOrAfterOpening(tx, fromAcc, args.date);
-    await assertOnOrAfterOpening(tx, toAcc, args.date);
 
     const obligations = await tx.obligation.findMany({
       where: { transferId: t.id },
@@ -399,6 +413,20 @@ export async function payTransfer(args: {
       [out, fromAcc, payOut],
       [inn, toAcc, payIn],
     ] as const) {
+      if (!account) {
+        // Histórico: solo baja el saldo de la partida; la caja ya refleja ese dinero
+        await tx.payment.create({
+          data: {
+            obligationId: ob.id,
+            amount: dec(amount),
+            date,
+            isHistorical: true,
+            note: 'Registro histórico (sin mover caja)',
+            createdById: args.userId,
+          },
+        });
+        continue;
+      }
       const mv = await tx.cashMovement.create({
         data: {
           entityId: ob.entityId,
@@ -417,11 +445,11 @@ export async function payTransfer(args: {
     }
     await tx.obligation.updateMany({ where: { transferId: t.id }, data: { status: closed ? 'SETTLED' : 'PARTIAL' } });
 
+    // Las cuentas solo se registran cuando hubo movimiento real
+    const accounts = fromAcc && toAcc ? { fromAccountId: fromAcc.id, toAccountId: toAcc.id } : {};
     return tx.interEntityTransfer.update({
       where: { id: t.id },
-      data: closed
-        ? { status: 'EXECUTED', executedDate: date, fromAccountId: fromAcc.id, toAccountId: toAcc.id }
-        : { fromAccountId: fromAcc.id, toAccountId: toAcc.id },
+      data: closed ? { status: 'EXECUTED', executedDate: date, ...accounts } : accounts,
     });
   });
 }
@@ -743,11 +771,11 @@ export async function deletePayment(obligationId: string, paymentId: string) {
     const p = await tx.payment.findUnique({ where: { id: paymentId }, include: { account: { select: { type: true } } } });
     if (!p || p.obligationId !== ob.id) throw notFound('Abono no encontrado');
     if (ob.transferId) throw conflict('Es una transferencia entre entidades: anúlala desde Transferencias');
-    if (p.account.type === 'CREDIT_CARD') {
+    if (p.account?.type === 'CREDIT_CARD') {
       throw conflict('Este pago se hizo con tarjeta (generó cuotas): no se puede deshacer desde aquí');
     }
     await tx.payment.delete({ where: { id: p.id } });
-    await tx.cashMovement.delete({ where: { id: p.cashMovementId } });
+    if (p.cashMovementId) await tx.cashMovement.delete({ where: { id: p.cashMovementId } });
     const agg = await tx.payment.aggregate({ where: { obligationId: ob.id }, _sum: { amount: true } });
     const paid = cents(agg._sum.amount);
     const status = ob.status === 'CANCELLED' ? 'CANCELLED' : paid === 0 ? 'OPEN' : paid >= cents(ob.amount) ? 'SETTLED' : 'PARTIAL';

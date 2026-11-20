@@ -291,18 +291,22 @@ model Obligation {
 }
 
 model Payment {
-  id             String       @id @default(uuid())
+  id             String        @id @default(uuid())
   obligationId   String
-  accountId      String
-  amount         Decimal      @db.Decimal(18, 2) // siempre positivo
-  date           DateTime     @db.Date
-  cashMovementId String       @unique
+  /// NULL solo en abonos históricos (no movieron caja)
+  accountId      String?
+  amount         Decimal       @db.Decimal(18, 2) // siempre positivo
+  date           DateTime      @db.Date
+  /// NULL solo en abonos históricos (no movieron caja)
+  cashMovementId String?       @unique
+  /// Registro histórico: baja el saldo de la partida sin mover caja
+  isHistorical   Boolean       @default(false)
   note           String?
   createdById    String?
-  createdAt      DateTime     @default(now())
-  obligation     Obligation   @relation(fields: [obligationId], references: [id], onDelete: Restrict)
-  account        Account      @relation(fields: [accountId], references: [id], onDelete: Restrict)
-  cashMovement   CashMovement @relation(fields: [cashMovementId], references: [id], onDelete: Restrict)
+  createdAt      DateTime      @default(now())
+  obligation     Obligation    @relation(fields: [obligationId], references: [id], onDelete: Restrict)
+  account        Account?      @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  cashMovement   CashMovement? @relation(fields: [cashMovementId], references: [id], onDelete: Restrict)
 
   @@index([obligationId])
 }

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { prisma } from '@/lib/server/db';
-import { conflict, notFound, ok, readJson, route } from '@/lib/server/api';
+import { badRequest, conflict, notFound, ok, readJson, route } from '@/lib/server/api';
 import { requireUser } from '@/lib/server/auth';
 import { assertEntityAccess } from '@/lib/server/scope';
 import { createLoanRepaymentTx, deleteTransfer, payTransfer, updateInterUnitTransfer } from '@/lib/server/services';
@@ -26,7 +26,13 @@ export const GET = route<{ params: { id: string } }>(async (_req, { params }) =>
   return ok(transferDto(t));
 });
 
-const accounts = { fromAccountId: id, toAccountId: id, date: isoDate.optional() };
+/** Cuentas requeridas salvo en registros históricos (sin mover caja). */
+const accounts = {
+  fromAccountId: id.optional().nullable(),
+  toAccountId: id.optional().nullable(),
+  date: isoDate.optional(),
+  historical: z.boolean().optional(),
+};
 const schema = z.discriminatedUnion('action', [
   /** Liquida todo lo pendiente. */
   z.object({ action: z.literal('execute'), ...accounts }),
@@ -64,11 +70,14 @@ export const POST = route<{ params: { id: string } }>(async (req, { params }) =>
   }
 
   const settings = await getSettings();
+  const today = todayInTz(settings.timezone);
+  if (data.historical && data.date && data.date > today) throw badRequest('Un registro histórico no puede tener fecha futura');
   await payTransfer({
     transferId: t.id,
     fromAccountId: data.fromAccountId,
     toAccountId: data.toAccountId,
-    date: data.date ?? todayInTz(settings.timezone),
+    historical: data.historical,
+    date: data.date ?? today,
     ...(data.action === 'pay' ? { amountFrom: data.amountFrom, amountTo: data.amountTo } : {}),
     userId: user.id,
   });

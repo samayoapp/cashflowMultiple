@@ -1401,6 +1401,8 @@ export function ExecuteTransferModal({
   const [amount, setAmount] = useState('');
   const [amountTo, setAmountTo] = useState('');
   const [amountToTouched, setAmountToTouched] = useState(false);
+  /** Registro histórico: baja el saldo sin mover caja (el dinero ya está en los saldos). */
+  const [historical, setHistorical] = useState(false);
 
   const isReimbursement = Boolean(t?.isReimbursement);
   // Devoluciones de préstamo y reembolsos se pagan por abonos
@@ -1418,6 +1420,7 @@ export function ExecuteTransferModal({
     setError(null);
     setDate(app.today);
     setAmountToTouched(false);
+    setHistorical(false);
   }, [open, app.today, setError]);
   useEffect(() => {
     if (open && t) {
@@ -1447,18 +1450,26 @@ export function ExecuteTransferModal({
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!t) return;
-    let body: Record<string, unknown> = { action: 'execute', fromAccountId, toAccountId, date };
+    if (historical && date > app.today) return setError('Un registro histórico no puede tener fecha futura');
+    const accounts = historical ? { historical: true } : { fromAccountId, toAccountId };
+    let body: Record<string, unknown> = { action: 'execute', ...accounts, date };
     if (abono) {
       const a = parseMoneyInput(amount);
       if (a === null || toCents(a) <= 0) return setError('Monto inválido');
       if (toCents(a) > t.remainingFrom) return setError('El abono supera el saldo pendiente');
       const b = differentCurrency ? parseMoneyInput(amountTo) : null;
       if (differentCurrency && (b === null || toCents(b) <= 0)) return setError('Monto recibido inválido');
-      body = { action: 'pay', fromAccountId, toAccountId, date, amountFrom: a, ...(b ? { amountTo: b } : {}) };
+      body = { action: 'pay', ...accounts, date, amountFrom: a, ...(b ? { amountTo: b } : {}) };
     }
     const ok = await run(
       () => api(`/api/transfers/${t.id}`, { body }),
-      abono ? 'Abono registrado' : isRepayment ? (isReimbursement ? 'Reembolso saldado' : 'Préstamo saldado') : 'Transferencia ejecutada',
+      historical
+        ? abono
+          ? 'Abono histórico registrado (sin mover caja)'
+          : 'Registrado como histórico (sin mover caja)'
+        : abono
+          ? 'Abono registrado'
+          : isRepayment ? (isReimbursement ? 'Reembolso saldado' : 'Préstamo saldado') : 'Transferencia ejecutada',
     );
     if (ok) onClose();
   }
@@ -1486,24 +1497,37 @@ export function ExecuteTransferModal({
                 </p>
               </div>
             )}
-            <Field label={`Sale de ${from?.name ?? ''}${abono ? '' : ` (${formatMoney(t.remainingFrom, fromCur)})`}`}>
-              <select className="input" value={fromAccountId} onChange={(e) => setFromAcc(e.target.value)} required>
-                {liquidAccounts(fromAccounts.data).map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.name} · {formatMoney(a.balance, fromCur)}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field label={`Entra a ${to?.name ?? ''}${abono ? '' : ` (${formatMoney(t.remainingTo, toCur)})`}`}>
-              <select className="input" value={toAccountId} onChange={(e) => setToAcc(e.target.value)} required>
-                {liquidAccounts(toAccounts.data).map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.name}
-                  </option>
-                ))}
-              </select>
-            </Field>
+            <div className="rounded-lg border border-slate-200 p-3 dark:border-slate-700">
+              <Toggle checked={historical} onChange={setHistorical} tone="violet" label="Registro histórico (no mueve caja)" />
+              {historical && (
+                <p className="mt-2 text-xs text-slate-500">
+                  Para pagos viejos que ya están reflejados en los saldos: baja lo pendiente en {from?.name} y {to?.name} sin tocar
+                  ninguna cuenta.
+                </p>
+              )}
+            </div>
+            {!historical && (
+              <>
+                <Field label={`Sale de ${from?.name ?? ''}${abono ? '' : ` (${formatMoney(t.remainingFrom, fromCur)})`}`}>
+                  <select className="input" value={fromAccountId} onChange={(e) => setFromAcc(e.target.value)} required>
+                    {liquidAccounts(fromAccounts.data).map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.name} · {formatMoney(a.balance, fromCur)}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label={`Entra a ${to?.name ?? ''}${abono ? '' : ` (${formatMoney(t.remainingTo, toCur)})`}`}>
+                  <select className="input" value={toAccountId} onChange={(e) => setToAcc(e.target.value)} required>
+                    {liquidAccounts(toAccounts.data).map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.name}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              </>
+            )}
             <div className="grid grid-cols-2 gap-3">
               {abono && (
                 <Field label={`Monto del abono (${fromCur})`}>
@@ -1524,8 +1548,8 @@ export function ExecuteTransferModal({
                   />
                 </Field>
               )}
-              <Field label="Fecha real">
-                <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
+              <Field label={historical ? 'Fecha en que se pagó' : 'Fecha real'}>
+                <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} max={historical ? app.today : undefined} required />
               </Field>
             </div>
           </>
@@ -1534,8 +1558,8 @@ export function ExecuteTransferModal({
           <Button type="button" onClick={onClose}>
             Cancelar
           </Button>
-          <Button type="submit" variant="primary" loading={loading} disabled={!t || !fromAccountId || !toAccountId}>
-            {abono ? 'Registrar abono' : isRepayment ? 'Saldar' : 'Ejecutar'}
+          <Button type="submit" variant="primary" loading={loading} disabled={!t || (!historical && (!fromAccountId || !toAccountId))}>
+            {historical ? 'Registrar histórico' : abono ? 'Registrar abono' : isRepayment ? 'Saldar' : 'Ejecutar'}
           </Button>
         </div>
       </form>
