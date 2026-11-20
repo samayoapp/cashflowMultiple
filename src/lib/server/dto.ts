@@ -65,6 +65,8 @@ export function obligationDto(o: ObligationWith) {
     remaining: Math.max(amount - paid, 0),
     dueDate: isoOf(o.dueDate),
     expectedDate: isoOf(o.expectedDate),
+    /** Reembolsos: fecha en que se hizo el gasto. */
+    expenseDate: isoOrNull(o.expenseDate),
     status: o.status,
     priority: o.priority,
     isHypothetical: o.isHypothetical,
@@ -138,7 +140,9 @@ export interface UpcomingOccurrenceDto {
 }
 
 export const transferInclude = {
-  obligations: { select: { direction: true, amount: true, categoryId: true, notes: true, payments: { select: { amount: true } } } },
+  obligations: {
+    select: { direction: true, amount: true, categoryId: true, notes: true, expenseDate: true, payments: { select: { amount: true } } },
+  },
   repayment: { select: { id: true, status: true } },
   reimbursedCharge: { select: { id: true } },
 } satisfies Prisma.InterEntityTransferInclude;
@@ -179,6 +183,8 @@ export function transferDto(t: TransferWith) {
     /** Categoría del gasto en la unidad origen (reembolsos). */
     categoryId: t.obligations.find((x) => x.direction === 'OUT')?.categoryId ?? null,
     notes: t.obligations.find((x) => x.direction === 'OUT')?.notes ?? null,
+    /** Reembolsos: fecha en que se hizo el gasto (expectedDate es la del reembolso). */
+    expenseDate: isoOrNull(t.obligations.find((x) => x.direction === 'OUT')?.expenseDate ?? null),
     /** Reembolso ligado a un consumo de tarjeta: su monto lo define el consumo. */
     chargeLinked: Boolean(t.reimbursedCharge),
   };

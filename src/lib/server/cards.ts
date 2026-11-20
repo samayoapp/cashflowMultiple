@@ -440,7 +440,8 @@ export async function createReimbursedExpense(args: {
           priority: 'FIXED',
           counterpartyId: counterpartyId ?? null,
           categoryId: categoryId ?? null,
-          notes: `Gasto del ${args.purchaseDate} pagado con tarjeta de ${args.owner.name}`,
+          expenseDate: dbDate(args.purchaseDate),
+          notes: `Pagado con tarjeta de ${args.owner.name}`,
           createdById: args.userId,
         },
       });
@@ -460,6 +461,7 @@ export async function createReimbursedExpense(args: {
       userId: args.userId,
       outCategoryId: categoryId ?? null,
       reimbursement: true,
+      expenseDate: args.purchaseDate,
     });
 
     // Opcional: el consumo en la tarjeta de la entidad dueña, SIN categoría (el gasto ya
@@ -539,6 +541,7 @@ export async function convertChargeToReimbursement(args: {
       userId: args.userId,
       outCategoryId: categoryId ?? null,
       reimbursement: true,
+      expenseDate: isoOf(charge.purchaseDate),
     });
     await tx.cardCharge.update({
       where: { id: charge.id },

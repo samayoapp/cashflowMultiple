@@ -271,6 +271,8 @@ model Obligation {
   transferId     String?
   stagingItemId  String?              @unique
   notes          String?
+  /// Fecha en que se hizo el gasto que se reembolsa (la fecha esperada es la del reembolso)
+  expenseDate    DateTime?            @db.Date
   createdById    String?
   createdAt      DateTime             @default(now())
   updatedAt      DateTime             @updatedAt

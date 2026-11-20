@@ -36,6 +36,7 @@ export const GET = route(async (req) => {
       paidTo: t.paidTo,
       expectedDate: t.expectedDate,
       executedDate: t.executedDate,
+      expenseDate: t.expenseDate,
       description: t.description,
       interest: t.interest,
     };

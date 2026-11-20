@@ -149,7 +149,10 @@ export function InterUnitStatement() {
                           <td className="td whitespace-nowrap text-sm">
                             {name(i.debtorId)} → {name(i.creditorId)}
                           </td>
-                          <td className="td whitespace-nowrap">{formatDateYear(i.date, app.today)}</td>
+                          <td className="td whitespace-nowrap">
+                            {formatDateYear(i.date, app.today)}
+                            {i.expenseDate && <div className="text-[11px] text-slate-500">Gasto del {formatDateYear(i.expenseDate, app.today)}</div>}
+                          </td>
                           <td className="td num">{formatMoney(i.original, c)}</td>
                           <td className="td num text-slate-500">{i.paid ? formatMoney(i.paid, c) : '—'}</td>
                           <td className="td num font-semibold">{i.pending ? formatMoney(i.pending, c) : '—'}</td>

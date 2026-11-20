@@ -34,6 +34,8 @@ const patchSchema = z.object({
   counterpartyName: z.string().trim().max(160).optional().nullable(),
   categoryId: id.optional().nullable(),
   notes: optionalText(1000),
+  /** Gasto reembolsable: fecha en que se hizo el gasto. */
+  expenseDate: isoDate.optional().nullable(),
   /** CANCELLED cancela; OPEN reabre una cancelada */
   status: z.enum(['CANCELLED', 'OPEN']).optional(),
 });
@@ -99,6 +101,7 @@ export const PATCH = route<{ params: { id: string } }>(async (req, { params }) =
         counterpartyId,
         categoryId,
         notes: data.notes === null ? undefined : data.notes,
+        expenseDate: data.expenseDate === undefined ? undefined : data.expenseDate ? dbDate(data.expenseDate) : null,
         status,
       },
       include: obligationInclude,

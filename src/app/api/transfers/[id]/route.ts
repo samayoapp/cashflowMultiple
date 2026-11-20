@@ -83,6 +83,8 @@ const patchSchema = z.object({
   amountFrom: positiveMoney.optional(),
   amountTo: positiveMoney.optional(),
   date: isoDate.optional(),
+  /** Reembolsos: fecha en que se hizo el gasto. */
+  expenseDate: isoDate.optional().nullable(),
 });
 
 /** Edita un reembolso o devolución entre unidades (ambas partidas a la vez). */

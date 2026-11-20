@@ -37,6 +37,16 @@ describe('estado de cuenta entre unidades', () => {
     expect(byId.r3).toMatchObject({ state: 'SETTLED', pending: 0 });
   });
 
+  it('reembolsos: conservan la fecha del gasto aparte de la fecha de reembolso', () => {
+    const [pair] = buildInterUnitStatement([
+      tr({ id: 'r1', isReimbursement: true, expenseDate: '2026-03-12', expectedDate: '2026-11-30' }),
+      tr({ id: 'r2', isReimbursement: true }),
+    ]);
+    const byId = Object.fromEntries(pair.items.map((i) => [i.transferId, i]));
+    expect(byId.r1).toMatchObject({ date: '2026-11-30', expenseDate: '2026-03-12' });
+    expect(byId.r2.expenseDate).toBeNull();
+  });
+
   it('préstamo entregado sin devolución: debe quien lo recibió; con devolución, la deuda vive en la devolución', () => {
     const noPlan = buildInterUnitStatement([tr({ id: 'l1', kind: 'LOAN', status: 'EXECUTED', fromEntityId: 'FAM', toEntityId: 'NEG' })]);
     expect(noPlan[0]).toMatchObject({ bOwesA: 1_000_00, aOwesB: 0 });

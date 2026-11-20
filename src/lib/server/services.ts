@@ -181,6 +181,8 @@ interface TransferArgs {
   repayment?: { dueDate: ISODate; interest: Cents } | null;
   /** Reembolso de un gasto pagado con tarjeta de la unidad destino (se paga por abonos). */
   reimbursement?: boolean;
+  /** Reembolsos: fecha en que se hizo el gasto (la esperada es la del reembolso). */
+  expenseDate?: ISODate | null;
 }
 
 /**
@@ -229,6 +231,7 @@ export async function createTransferTx(tx: Tx, args: TransferArgs) {
         priority: 'FLEXIBLE',
         transferId: t.id,
         categoryId: args.outCategoryId ?? null,
+        expenseDate: args.expenseDate ? dbDate(args.expenseDate) : null,
         createdById: args.userId,
       },
       {
@@ -240,6 +243,7 @@ export async function createTransferTx(tx: Tx, args: TransferArgs) {
         expectedDate: dbDate(args.expectedDate),
         priority: 'FLEXIBLE',
         transferId: t.id,
+        expenseDate: args.expenseDate ? dbDate(args.expenseDate) : null,
         createdById: args.userId,
       },
     ],
@@ -459,6 +463,8 @@ export async function updateInterUnitTransfer(args: {
   amountFrom?: Cents;
   amountTo?: Cents;
   date?: ISODate;
+  /** Reembolsos: fecha en que se hizo el gasto. */
+  expenseDate?: ISODate | null;
 }) {
   return prisma.$transaction(async (tx) => {
     const { t, out, inn, paidFrom, paidTo } = await loadInterUnitForEdit(tx, args.transferId);
@@ -530,6 +536,15 @@ export async function updateInterUnitTransfer(args: {
         data.dueDate = d;
         data.expectedDate = d;
       }
+    }
+
+    if (args.expenseDate !== undefined) {
+      if (!isReimb) throw badRequest('Solo los reembolsos llevan fecha del gasto');
+      const reimburseOn = args.date ?? isoOf(t.expectedDate);
+      if (args.expenseDate && reimburseOn < args.expenseDate) throw badRequest('El reembolso no puede ser anterior al gasto');
+      const d = args.expenseDate ? dbDate(args.expenseDate) : null;
+      outData.expenseDate = d;
+      inData.expenseDate = d;
     }
 
     await tx.interEntityTransfer.update({ where: { id: t.id }, data: transferData });

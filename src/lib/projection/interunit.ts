@@ -30,6 +30,8 @@ export interface InterUnitTransfer {
   paidTo: Cents;
   expectedDate: ISODate;
   executedDate: ISODate | null;
+  /** Reembolsos: fecha en que se hizo el gasto. */
+  expenseDate?: ISODate | null;
   description: string | null;
   interest: Cents;
 }
@@ -40,6 +42,8 @@ export interface InterUnitItem {
   /** Estado de la deuda. */
   state: 'OPEN' | 'PARTIAL' | 'SETTLED' | 'CANCELLED' | 'NO_PLAN';
   date: ISODate;
+  /** Reembolsos: fecha en que se hizo el gasto (`date` es la del reembolso). */
+  expenseDate: ISODate | null;
   description: string | null;
   debtorId: string;
   creditorId: string;
@@ -78,6 +82,7 @@ export function buildInterUnitStatement(transfers: InterUnitTransfer[], entityId
         state:
           t.status === 'CANCELLED' ? 'CANCELLED' : t.status === 'EXECUTED' || pending === 0 ? 'SETTLED' : t.paidTo > 0 ? 'PARTIAL' : 'OPEN',
         date: t.expectedDate,
+        expenseDate: t.expenseDate ?? null,
         description: t.description,
         debtorId: t.fromEntityId,
         creditorId: t.toEntityId,
@@ -94,6 +99,7 @@ export function buildInterUnitStatement(transfers: InterUnitTransfer[], entityId
         kind: 'LOAN',
         state: t.hasRepayment ? 'SETTLED' : 'NO_PLAN',
         date: t.executedDate ?? t.expectedDate,
+        expenseDate: null,
         description: t.description,
         debtorId: t.toEntityId,
         creditorId: t.fromEntityId,

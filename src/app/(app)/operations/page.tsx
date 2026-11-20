@@ -535,6 +535,7 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
                       </div>
                       <div className="flex flex-wrap items-center gap-1 text-xs text-slate-500">
                         {o.counterparty?.name ?? 'Sin contraparte'}
+                        {o.expenseDate && <Badge>Gasto del {formatDateYear(o.expenseDate, app.today)}</Badge>}
                         {o.isHypothetical && <Badge tone="violet">Hipotética</Badge>}
                         {o.recurrenceId && <Badge tone="blue">Recurrente</Badge>}
                         {o.interUnit && (
@@ -1006,7 +1007,10 @@ function TransfersTab() {
                         {from && <EntityDot color={from.color} />} {from?.name ?? '—'} → {to && <EntityDot color={to.color} />} {to?.name ?? '—'}
                       </span>
                     </td>
-                    <td className="td">{formatDateYear(t.executedDate ?? t.expectedDate, app.today)}</td>
+                    <td className="td">
+                      {formatDateYear(t.executedDate ?? t.expectedDate, app.today)}
+                      {t.expenseDate && <div className="text-[11px] text-slate-500">Gasto del {formatDateYear(t.expenseDate, app.today)}</div>}
+                    </td>
                     <td className="td num">{formatMoney(t.amountFrom, from?.currency ?? 'HNL')}</td>
                     <td className="td num">
                       {formatMoney(t.amountTo, to?.currency ?? 'HNL')}

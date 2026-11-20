@@ -541,6 +541,8 @@ export interface ObligationLike {
   isHypothetical: boolean;
   counterparty: { id: string; name: string } | null;
   notes: string | null;
+  /** Gasto reembolsable: fecha en que se hizo el gasto. */
+  expenseDate?: string | null;
   transferId: string | null;
   recurrenceId?: string | null;
   payments?: { id: string; amount: Cents; date: string; accountName: string; byCard?: boolean }[];
@@ -571,6 +573,7 @@ export function ObligationFormModal({
   const [priority, setPriority] = useState<'FIXED' | 'FLEXIBLE'>('FLEXIBLE');
   const [isHypothetical, setIsHypothetical] = useState(false);
   const [notes, setNotes] = useState('');
+  const [expenseDate, setExpenseDate] = useState('');
   // Historia: crear la partida ya liquidada (cuenta y fecha real del pago/cobro)
   const [settled, setSettled] = useState(false);
   const [settleAccount, setSettleAccount] = useState('');
@@ -597,6 +600,7 @@ export function ObligationFormModal({
     setPriority(obligation?.priority ?? (direction === 'OUT' ? 'FIXED' : 'FLEXIBLE'));
     setIsHypothetical(obligation?.isHypothetical ?? Boolean(hypothetical));
     setNotes(obligation?.notes ?? '');
+    setExpenseDate(obligation?.expenseDate ?? '');
     setSettled(false);
     setSettleAccount('');
     setSettleDate(app.today);
@@ -664,6 +668,7 @@ export function ObligationFormModal({
       priority,
       counterpartyName: counterparty.trim() || null,
       notes: notes || null,
+      ...(obligation?.expenseDate ? { expenseDate: expenseDate || null } : {}),
     };
     const ok = await run(
       () =>
@@ -739,6 +744,11 @@ export function ObligationFormModal({
               <option value="FIXED">Inamovible (planilla, impuestos, préstamos)</option>
               <option value="FLEXIBLE">Flexible / negociable</option>
             </select>
+          </Field>
+        )}
+        {obligation?.expenseDate && (
+          <Field label="Fecha del gasto" hint="Cuándo se hizo el gasto; las fechas de arriba son las del reembolso">
+            <input className="input" type="date" value={expenseDate} onChange={(e) => setExpenseDate(e.target.value)} />
           </Field>
         )}
         <Field label="Notas (opcional)">
@@ -1671,6 +1681,7 @@ export function InterUnitEditModal({ open, onClose, transferId }: { open: boolea
   const [amountTo, setAmountTo] = useState('');
   const [categoryId, setCategoryId] = useState('');
   const [notes, setNotes] = useState('');
+  const [expenseDate, setExpenseDate] = useState('');
 
   useEffect(() => {
     if (!open || !t || t.id !== transferId) return;
@@ -1681,6 +1692,7 @@ export function InterUnitEditModal({ open, onClose, transferId }: { open: boolea
     setAmountTo(centsInput(t.amountTo));
     setCategoryId(t.categoryId ?? '');
     setNotes(t.notes ?? '');
+    setExpenseDate(t.expenseDate ?? '');
   }, [open, t, transferId, setError]);
 
   if (!open || !t || t.id !== transferId) return null;
@@ -1697,7 +1709,10 @@ export function InterUnitEditModal({ open, onClose, transferId }: { open: boolea
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     const body: Record<string, unknown> = { description, date, notes: notes.trim() || null };
-    if (isReimb) body.categoryId = categoryId || null;
+    if (isReimb) {
+      body.categoryId = categoryId || null;
+      body.expenseDate = expenseDate || null;
+    }
     if (!amountLocked) {
       const af = parseMoneyInput(amountFrom);
       if (!af || Number(af) <= 0) return setError('Monto inválido');
@@ -1753,21 +1768,22 @@ export function InterUnitEditModal({ open, onClose, transferId }: { open: boolea
               required
             />
           </Field>
-          {!sameCurrency ? (
+          {!sameCurrency && (
             <Field label={`Recibe ${to?.name} (${curTo})`}>
               <input className="input text-right" inputMode="decimal" value={amountTo} onChange={(e) => setAmountTo(e.target.value)} disabled={amountLocked} />
             </Field>
-          ) : (
-            <Field label={isReimb ? 'Fecha de reembolso' : 'Fecha de devolución'}>
-              <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
-            </Field>
           )}
         </div>
-        {!sameCurrency && (
+        <div className="grid grid-cols-2 gap-3">
+          {isReimb && (
+            <Field label="Fecha del gasto">
+              <input className="input" type="date" value={expenseDate} onChange={(e) => setExpenseDate(e.target.value)} max={date || undefined} />
+            </Field>
+          )}
           <Field label={isReimb ? 'Fecha de reembolso' : 'Fecha de devolución'}>
             <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
           </Field>
-        )}
+        </div>
         {amountLocked && (
           <p className="text-xs text-slate-500">
             {t.chargeLinked
