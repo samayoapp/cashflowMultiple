@@ -3,6 +3,7 @@ import { prisma } from '@/lib/server/db';
 import { ok, readJson, route } from '@/lib/server/api';
 import { requireUser } from '@/lib/server/auth';
 import { assertEntityAccess, resolveContext } from '@/lib/server/scope';
+import { createCategory } from '@/lib/server/catalog';
 import { direction, id, shortText } from '@/lib/validation';
 
 export const dynamic = 'force-dynamic';
@@ -46,8 +47,6 @@ export const POST = route(async (req) => {
     });
     return ok(c, { status: 201 });
   }
-  const c = await prisma.category.create({
-    data: { entityId: data.entityId, name: data.name, direction: data.direction },
-  });
+  const c = await createCategory(prisma, { entityId: data.entityId, name: data.name, direction: data.direction });
   return ok(c, { status: 201 });
 });

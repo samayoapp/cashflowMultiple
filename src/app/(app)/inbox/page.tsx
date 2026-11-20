@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Check, Inbox, X } from 'lucide-react';
 import { useApp } from '@/components/AppContext';
 import { Badge, Button, Card, EmptyState, ErrorBox, Field, Loading, Modal, TableTotals, Tabs, useToast } from '@/components/ui';
+import { CategorySelect } from '@/components/CategorySelect';
 import { EntityDot } from '@/components/AppShell';
 import { centsInput, parseMoneyInput } from '@/components/forms';
 import { api, emitDataChanged, useApi } from '@/lib/client/api';
@@ -39,13 +40,12 @@ export default function InboxPage() {
   const [status, setStatus] = useState<Status>('PENDING');
   const { data, error, loading } = useApi<StagingRow[]>(`/api/staging?status=${status}`);
   const [review, setReview] = useState<StagingRow | null>(null);
-  const [form, setForm] = useState({ direction: 'IN', description: '', amount: '', dueDate: '', expectedDate: '', counterpartyName: '' });
+  const [form, setForm] = useState({ direction: 'IN', description: '', amount: '', dueDate: '', expectedDate: '', counterpartyName: '', categoryId: '' });
   const [saving, setSaving] = useState(false);
   const [mode, setMode] = useState<'obligation' | 'card'>('obligation');
   const [cardForm, setCardForm] = useState({ cardAccountId: '', installments: 1, categoryId: '', purchaseDate: '', currency: '', amount: '' });
   const reviewEntity = review ? app.entityById.get(review.entityId) : undefined;
   const accounts = useApi<AccountDto[]>(review ? `/api/accounts?ctx=${review.entityId}` : null);
-  const catalog = useApi<{ categories: { id: string; name: string; direction: 'IN' | 'OUT' }[] }>(review ? `/api/catalog?ctx=${review.entityId}` : null);
   const cards = useMemo(() => (accounts.data ?? []).filter((a) => a.type === 'CREDIT_CARD' && !a.archived), [accounts.data]);
   const selectedCard = cards.find((c) => c.id === cardForm.cardAccountId);
 
@@ -87,6 +87,7 @@ export default function InboxPage() {
       dueDate: row.dueDate ?? app.today,
       expectedDate: row.expectedDate ?? row.dueDate ?? app.today,
       counterpartyName: row.counterparty ?? '',
+      categoryId: '',
     });
   }
 
@@ -114,7 +115,7 @@ export default function InboxPage() {
         const amount = parseMoneyInput(form.amount);
         if (!amount) throw new Error('Monto inválido');
         await api(`/api/staging/${row.id}`, {
-          body: { action, ...form, amount, counterpartyName: form.counterpartyName || undefined },
+          body: { action, ...form, amount, counterpartyName: form.counterpartyName || undefined, categoryId: form.categoryId || null },
         });
       } else {
         await api(`/api/staging/${row.id}`, { body: { action } });
@@ -266,7 +267,7 @@ export default function InboxPage() {
               />
               {mode === 'obligation' && (
                 <Field label="Tipo">
-                  <select className="input" value={form.direction} onChange={(e) => setForm({ ...form, direction: e.target.value })}>
+                  <select className="input" value={form.direction} onChange={(e) => setForm({ ...form, direction: e.target.value, categoryId: '' })}>
                     <option value="IN">Cuenta por cobrar</option>
                     <option value="OUT">Cuenta por pagar</option>
                   </select>
@@ -284,7 +285,7 @@ export default function InboxPage() {
                   loaded={Boolean(accounts.data)}
                   entityCurrency={reviewEntity?.currency ?? 'HNL'}
                   selectedCard={selectedCard}
-                  categories={(catalog.data?.categories ?? []).filter((c) => c.direction === 'OUT')}
+                  entityId={review.entityId}
                   value={cardForm}
                   onChange={setCardForm}
                 />
@@ -293,6 +294,12 @@ export default function InboxPage() {
                   <Field label={`Monto (${app.entityById.get(review.entityId)?.currency ?? ''})`} hint={toEntityCurrency(review).note ?? undefined}>
                     <input className="input text-right" inputMode="decimal" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} />
                   </Field>
+                  <CategorySelect
+                    entityId={review.entityId}
+                    direction={form.direction === 'OUT' ? 'OUT' : 'IN'}
+                    value={form.categoryId}
+                    onChange={(categoryId) => setForm({ ...form, categoryId })}
+                  />
                   <div className="grid grid-cols-2 gap-3">
                     <Field label="Vencimiento">
                       <input className="input" type="date" value={form.dueDate} onChange={(e) => setForm({ ...form, dueDate: e.target.value })} />
@@ -323,7 +330,7 @@ function CardApprovalFields({
   loaded,
   entityCurrency,
   selectedCard,
-  categories,
+  entityId,
   value,
   onChange,
 }: {
@@ -331,7 +338,7 @@ function CardApprovalFields({
   loaded: boolean;
   entityCurrency: string;
   selectedCard: AccountDto | undefined;
-  categories: { id: string; name: string }[];
+  entityId: string;
   value: CardForm;
   onChange: (v: CardForm) => void;
 }) {
@@ -369,16 +376,7 @@ function CardApprovalFields({
         </Field>
       </div>
       <div className="grid grid-cols-2 gap-3">
-        <Field label="Categoría">
-          <select className="input" value={value.categoryId} onChange={(e) => onChange({ ...value, categoryId: e.target.value })}>
-            <option value="">Sin categoría</option>
-            {categories.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-        </Field>
+        <CategorySelect entityId={entityId} direction="OUT" value={value.categoryId} onChange={(categoryId) => onChange({ ...value, categoryId })} label="Categoría" />
         <Field label="Fecha de compra">
           <input className="input" type="date" value={value.purchaseDate} onChange={(e) => onChange({ ...value, purchaseDate: e.target.value })} />
         </Field>

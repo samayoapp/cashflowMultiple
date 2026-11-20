@@ -3,7 +3,7 @@ import { prisma } from '@/lib/server/db';
 import { badRequest, conflict, notFound, ok, readJson, route } from '@/lib/server/api';
 import { requireUser } from '@/lib/server/auth';
 import { assertEntityAccess } from '@/lib/server/scope';
-import { resolveCounterparty } from '@/lib/server/catalog';
+import { assertCategory, resolveCounterparty } from '@/lib/server/catalog';
 import { cents, dbDate, dec, isoOrNull } from '@/lib/server/serialize';
 import { direction, id, isoDate, positiveMoney, priority } from '@/lib/validation';
 import { createCardCharge } from '@/lib/server/cards';
@@ -23,6 +23,7 @@ const schema = z.discriminatedUnion('action', [
     dueDate: isoDate.optional(),
     expectedDate: isoDate.optional(),
     counterpartyName: z.string().trim().max(160).optional(),
+    categoryId: id.optional().nullable(),
     priority: priority.default('FLEXIBLE'),
   }),
   // Aprobar como consumo con tarjeta (en la moneda detectada: HNL o USD)
@@ -117,10 +118,12 @@ export const POST = route<{ params: { id: string } }>(async (req, { params }) =>
       { counterpartyName: data.counterpartyName ?? item.counterparty },
       dir === 'IN' ? 'CUSTOMER' : 'SUPPLIER',
     );
+    const categoryId = await assertCategory(tx, item.entityId, data.categoryId);
     const ob = await tx.obligation.create({
       data: {
         entityId: item.entityId,
         direction: dir,
+        categoryId: categoryId ?? null,
         description,
         amount: dec(amount),
         dueDate: dbDate(dueDate),

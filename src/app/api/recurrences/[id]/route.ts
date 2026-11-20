@@ -5,9 +5,9 @@ import { deleteRecurrence } from '@/lib/server/services';
 import { requireUser } from '@/lib/server/auth';
 import { assertEntityAccess } from '@/lib/server/scope';
 import { dbDate, dec, isoOf } from '@/lib/server/serialize';
-import { frequency, isoDate, positiveMoney, priority, shortText } from '@/lib/validation';
+import { frequency, id, isoDate, positiveMoney, priority, shortText } from '@/lib/validation';
 import { ruleDto, ruleInclude } from '@/lib/server/dto';
-import { resolveCounterparty } from '@/lib/server/catalog';
+import { assertCategory, resolveCounterparty } from '@/lib/server/catalog';
 
 export const dynamic = 'force-dynamic';
 
@@ -23,6 +23,8 @@ const schema = z.object({
   isHypothetical: z.boolean().optional(),
   /** Nombre de cliente/proveedor; null o vacío la quita, undefined no la toca. */
   counterpartyName: z.string().trim().max(160).optional().nullable(),
+  /** Categoría; también re-etiqueta las fechas ya registradas que tenían la anterior (no mueve dinero). */
+  categoryId: id.optional().nullable(),
 });
 
 /** Los cambios aplican a ocurrencias futuras no materializadas. */
@@ -46,6 +48,11 @@ export const PATCH = route<{ params: { id: string } }>(async (req, { params }) =
             { counterpartyName: data.counterpartyName || null },
             r.direction === 'IN' ? 'CUSTOMER' : 'SUPPLIER',
           );
+    const categoryId = data.categoryId === undefined ? undefined : ((await assertCategory(tx, r.entityId, data.categoryId)) ?? null);
+    if (categoryId !== undefined && categoryId !== r.categoryId) {
+      // Etiqueta para análisis: las ocurrencias que seguían a la regla toman la nueva
+      await tx.obligation.updateMany({ where: { recurrenceId: r.id, categoryId: r.categoryId }, data: { categoryId } });
+    }
     if (data.isHypothetical !== undefined && data.isHypothetical !== r.isHypothetical) {
       // Las fechas ya materializadas y sin abonos siguen a la regla (las que tienen abonos son reales)
       await tx.obligation.updateMany({
@@ -65,6 +72,7 @@ export const PATCH = route<{ params: { id: string } }>(async (req, { params }) =
         active: data.active,
         isHypothetical: data.isHypothetical,
         counterpartyId,
+        categoryId,
       },
       include: ruleInclude,
     });

@@ -30,6 +30,8 @@ export const GET = route(async (req) => {
   const q = sp.get('q')?.trim();
   const from = sp.get('from');
   const to = sp.get('to');
+  /** Id de categoría, o "none" para lo que no tiene. */
+  const category = sp.get('category');
   if ((from && !isISODate(from)) || (to && !isISODate(to))) throw badRequest('Período inválido');
   const order = sp.get('order') === 'desc' ? 'desc' : 'asc';
   const limit = Math.min(Math.max(Number(sp.get('limit')) || 1000, 1), 5000);
@@ -43,22 +45,25 @@ export const GET = route(async (req) => {
         ? { status: { in: ['SETTLED', 'CANCELLED'] } }
         : {}),
     ...(from || to ? { dueDate: { ...(from ? { gte: dbDate(from) } : {}), ...(to ? { lte: dbDate(to) } : {}) } } : {}),
-    ...(transfers === 'exclude'
-      ? { transferId: null }
-      : transfers === 'only'
-        ? { transferId: { not: null } }
-        : transfers === 'loans'
-          ? // Partidas normales + devoluciones de préstamos y reembolsos entre unidades (se cobran/pagan por abonos)
-            { OR: [{ transferId: null }, { transfer: { repaymentOfId: { not: null } } }, { transfer: { isReimbursement: true } }] }
-          : {}),
-    ...(q
-      ? {
-          OR: [
-            { description: { contains: q, mode: 'insensitive' } },
-            { counterparty: { name: { contains: q, mode: 'insensitive' } } },
-          ],
-        }
-      : {}),
+    ...(transfers === 'exclude' ? { transferId: null } : transfers === 'only' ? { transferId: { not: null } } : {}),
+    ...(category === 'none' ? { categoryId: null } : category ? { categoryId: category } : {}),
+    // En AND: el filtro de transferencias y la búsqueda usan OR cada uno y no deben pisarse
+    AND: [
+      ...(transfers === 'loans'
+        ? // Partidas normales + devoluciones de préstamos y reembolsos entre unidades (se cobran/pagan por abonos)
+          [{ OR: [{ transferId: null }, { transfer: { repaymentOfId: { not: null } } }, { transfer: { isReimbursement: true } }] }]
+        : []),
+      ...(q
+        ? [
+            {
+              OR: [
+                { description: { contains: q, mode: 'insensitive' as const } },
+                { counterparty: { name: { contains: q, mode: 'insensitive' as const } } },
+              ],
+            },
+          ]
+        : []),
+    ],
   };
 
   const rows = await prisma.obligation.findMany({

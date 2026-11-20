@@ -11,6 +11,7 @@ import { convertPair, rate4, rateToString } from '@/lib/projection/fx';
 import { useApp } from './AppContext';
 import { Badge, Button, ErrorBox, Field, Modal, Tabs, useToast } from './ui';
 import { centsInput, parseMoneyInput } from './forms';
+import { CategorySelect } from './CategorySelect';
 
 export const INSTALLMENT_OPTIONS = [1, 2, 3, 4, 5, 6, 9, 10, 12, 15, 18, 24, 36];
 
@@ -119,7 +120,6 @@ export function CardChargeModal({
   const ownerAccounts = useApi<AccountDto[]>(open && mode === 'third' && ownerKind === 'ENTITY' && ownerEntityId ? `/api/accounts?ctx=${ownerEntityId}` : null);
   const catalog = useApi<{
     counterparties: { id: string; name: string }[];
-    categories: { id: string; name: string; direction: 'IN' | 'OUT' }[];
   }>(open && entityId ? `/api/catalog?ctx=${entityId}` : null);
 
   const cards = useMemo(() => (accounts.data ?? []).filter((a) => isCard(a) && !a.archived), [accounts.data]);
@@ -198,8 +198,6 @@ export function CardChargeModal({
     if (ok) onClose();
   }
 
-  const outCategories = (catalog.data?.categories ?? []).filter((c) => c.direction === 'OUT');
-
   return (
     <Modal open={open} onClose={onClose} title="Gasto con tarjeta de crédito" wide>
       <form onSubmit={submit} className="space-y-3">
@@ -215,7 +213,15 @@ export function CardChargeModal({
         <div className="grid grid-cols-2 gap-3">
           {!fixedEntityId && (
             <Field label="Unidad de negocio que registra el gasto">
-              <select className="input" value={entityId} onChange={(e) => setEntityId(e.target.value)} required>
+              <select
+                className="input"
+                value={entityId}
+                onChange={(e) => {
+                  setEntityId(e.target.value);
+                  setCategoryId('');
+                }}
+                required
+              >
                 {app.activeEntities.map((e) => (
                   <option key={e.id} value={e.id}>
                     {e.name} ({e.currency})
@@ -250,16 +256,7 @@ export function CardChargeModal({
               {catalog.data?.counterparties.map((c) => <option key={c.id} value={c.name} />)}
             </datalist>
           </Field>
-          <Field label="Categoría del gasto">
-            <select className="input" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
-              <option value="">Sin categoría</option>
-              {outCategories.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
-          </Field>
+          <CategorySelect entityId={entityId} direction="OUT" value={categoryId} onChange={setCategoryId} />
         </div>
         <div className="grid grid-cols-3 gap-3">
           <Field label={`Monto total (${currency})`}>
@@ -581,10 +578,6 @@ export function AssignChargeModal({ open, onClose, target }: { open: boolean; on
   const [amountTo, setAmountTo] = useState('');
   const [reimburseDate, setReimburseDate] = useState(app.today);
   const [categoryId, setCategoryId] = useState('');
-  const catalog = useApi<{ categories: { id: string; name: string; direction: 'IN' | 'OUT' }[] }>(
-    open && entityId ? `/api/catalog?ctx=${entityId}` : null,
-  );
-  const outCategories = (catalog.data?.categories ?? []).filter((c) => c.direction === 'OUT');
 
   useEffect(() => {
     if (!open || !target) return;
@@ -646,16 +639,7 @@ export function AssignChargeModal({ open, onClose, target }: { open: boolean; on
                   ))}
                 </select>
               </Field>
-              <Field label="Categoría del gasto">
-                <select className="input" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
-                  <option value="">Sin categoría</option>
-                  {outCategories.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name}
-                    </option>
-                  ))}
-                </select>
-              </Field>
+              <CategorySelect entityId={entityId} direction="OUT" value={categoryId} onChange={setCategoryId} />
             </div>
             <div className="grid grid-cols-2 gap-3">
               <Field label={`Monto a reembolsar (${destCur})`}>

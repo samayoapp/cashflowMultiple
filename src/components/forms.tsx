@@ -10,6 +10,7 @@ import { dueDateFor, nextDayOnOrAfter, statementCloseFor } from '@/lib/projectio
 import { useApp } from './AppContext';
 import { Button, cn, confirmDialog, ErrorBox, Field, Modal, Toggle, useToast } from './ui';
 import { CardImpactPreview, INSTALLMENT_OPTIONS, isCard, liquidAccounts } from './cards';
+import { CategorySelect } from './CategorySelect';
 
 const CURRENCIES = ['HNL', 'USD', 'EUR'];
 const PALETTE = ['#10b981', '#6366f1', '#f59e0b', '#ef4444', '#06b6d4', '#8b5cf6', '#ec4899', '#84cc16'];
@@ -540,6 +541,8 @@ export interface ObligationLike {
   priority: 'FIXED' | 'FLEXIBLE';
   isHypothetical: boolean;
   counterparty: { id: string; name: string } | null;
+  /** undefined = quien abre el formulario no la conoce (no se toca al guardar). */
+  category?: { id: string; name: string } | null;
   notes: string | null;
   /** Gasto reembolsable: fecha en que se hizo el gasto. */
   expenseDate?: string | null;
@@ -574,6 +577,7 @@ export function ObligationFormModal({
   const [isHypothetical, setIsHypothetical] = useState(false);
   const [notes, setNotes] = useState('');
   const [expenseDate, setExpenseDate] = useState('');
+  const [categoryId, setCategoryId] = useState('');
   // Historia: crear la partida ya liquidada (cuenta y fecha real del pago/cobro)
   const [settled, setSettled] = useState(false);
   const [settleAccount, setSettleAccount] = useState('');
@@ -601,6 +605,7 @@ export function ObligationFormModal({
     setIsHypothetical(obligation?.isHypothetical ?? Boolean(hypothetical));
     setNotes(obligation?.notes ?? '');
     setExpenseDate(obligation?.expenseDate ?? '');
+    setCategoryId(obligation?.category?.id ?? '');
     setSettled(false);
     setSettleAccount('');
     setSettleDate(app.today);
@@ -667,6 +672,7 @@ export function ObligationFormModal({
       expectedDate,
       priority,
       counterpartyName: counterparty.trim() || null,
+      ...(!obligation || obligation.category !== undefined ? { categoryId: categoryId || null } : {}),
       notes: notes || null,
       ...(obligation?.expenseDate ? { expenseDate: expenseDate || null } : {}),
     };
@@ -696,7 +702,13 @@ export function ObligationFormModal({
         {error && <ErrorBox message={error} />}
         {!obligation && (
           <Field label="Unidad de negocio">
-            <EntitySelect value={entityId} onChange={setEntityId} />
+            <EntitySelect
+              value={entityId}
+              onChange={(id) => {
+                setEntityId(id);
+                setCategoryId(''); // las categorías son de cada unidad
+              }}
+            />
           </Field>
         )}
         <Field label="Descripción">
@@ -720,6 +732,13 @@ export function ObligationFormModal({
             <input className="input text-right" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} required />
           </Field>
         </div>
+        <CategorySelect
+          entityId={entityId}
+          direction={(obligation?.direction ?? direction) as 'IN' | 'OUT'}
+          value={categoryId}
+          onChange={setCategoryId}
+          label={isIn ? 'Categoría del ingreso' : 'Categoría del gasto'}
+        />
         <div className="grid grid-cols-2 gap-3">
           <Field label="Vencimiento contractual">
             <input
@@ -1089,11 +1108,13 @@ export function RecurrenceFormModal({
   const [endDate, setEndDate] = useState('');
   const [priority, setPriority] = useState<'FIXED' | 'FLEXIBLE'>('FIXED');
   const [isHypothetical, setIsHypothetical] = useState(false);
+  const [categoryId, setCategoryId] = useState('');
 
   useEffect(() => {
     if (!open) return;
     setError(null);
     if (rule) {
+      setCategoryId(rule.category?.id ?? '');
       setEntityId(rule.entityId);
       setDirection(rule.direction);
       setDescription(rule.description);
@@ -1106,6 +1127,7 @@ export function RecurrenceFormModal({
       setIsHypothetical(rule.isHypothetical);
       return;
     }
+    setCategoryId('');
     setEntityId(defaultEntity);
     setDirection(defaultDirection);
     setDescription('');
@@ -1132,6 +1154,7 @@ export function RecurrenceFormModal({
       endDate: endDate || null,
       priority,
       counterpartyName: counterparty.trim() || null,
+      categoryId: categoryId || null,
       isHypothetical,
     };
     const ok = await run(
@@ -1157,11 +1180,25 @@ export function RecurrenceFormModal({
             {editing ? (
               <input className="input" value={app.entityById.get(entityId)?.name ?? ''} disabled />
             ) : (
-              <EntitySelect value={entityId} onChange={setEntityId} />
+              <EntitySelect
+                value={entityId}
+                onChange={(id) => {
+                  setEntityId(id);
+                  setCategoryId('');
+                }}
+              />
             )}
           </Field>
           <Field label="Tipo">
-            <select className="input" value={direction} onChange={(e) => setDirection(e.target.value as 'IN' | 'OUT')} disabled={editing}>
+            <select
+              className="input"
+              value={direction}
+              onChange={(e) => {
+                setDirection(e.target.value as 'IN' | 'OUT');
+                setCategoryId('');
+              }}
+              disabled={editing}
+            >
               <option value="OUT">Gasto recurrente</option>
               <option value="IN">Ingreso recurrente</option>
             </select>
@@ -1178,6 +1215,7 @@ export function RecurrenceFormModal({
             <input className="input text-right" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} required />
           </Field>
         </div>
+        <CategorySelect entityId={entityId} direction={direction} value={categoryId} onChange={setCategoryId} />
         <div className="grid grid-cols-3 gap-3">
           <Field label="Frecuencia">
             <select className="input" value={frequency} onChange={(e) => setFrequency(e.target.value)}>
@@ -1719,9 +1757,6 @@ export function InterUnitEditModal({ open, onClose, transferId }: { open: boolea
   const { loading, error, run, setError } = useSubmit();
   const { data: t } = useApi<TransferDto>(open && transferId ? `/api/transfers/${transferId}` : null);
   const isReimb = Boolean(t?.isReimbursement);
-  const catalog = useApi<{ categories: { id: string; name: string; direction: 'IN' | 'OUT' }[] }>(
-    open && t && isReimb ? `/api/catalog?ctx=${t.fromEntityId}` : null,
-  );
   const [description, setDescription] = useState('');
   const [date, setDate] = useState('');
   const [amountFrom, setAmountFrom] = useState('');
@@ -1753,7 +1788,6 @@ export function InterUnitEditModal({ open, onClose, transferId }: { open: boolea
   const amountLocked = !isReimb || t.chargeLinked || settled;
   const canDelete = !t.chargeLinked;
   const label = isReimb ? 'reembolso' : 'devolución';
-  const outCategories = (catalog.data?.categories ?? []).filter((c) => c.direction === 'OUT');
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -1875,16 +1909,7 @@ export function InterUnitEditModal({ open, onClose, transferId }: { open: boolea
           </p>
         )}
         {isReimb && (
-          <Field label={`Categoría del gasto en ${from?.name}`}>
-            <select className="input" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
-              <option value="">Sin categoría</option>
-              {outCategories.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
-          </Field>
+          <CategorySelect entityId={t.fromEntityId} direction="OUT" value={categoryId} onChange={setCategoryId} label={`Categoría del gasto en ${from?.name}`} />
         )}
         <Field label="Notas">
           <textarea className="input min-h-[60px]" value={notes} onChange={(e) => setNotes(e.target.value)} maxLength={1000} />

@@ -48,7 +48,7 @@ export const GET = route(async (req) => {
 
   const rules = await prisma.recurringRule.findMany({
     where,
-    include: { counterparty: { select: { id: true, name: true } }, category: { select: { id: true, name: true } } },
+    include: { counterparty: { select: { id: true, name: true } }, category: { select: { id: true, name: true, color: true } } },
   });
   if (rules.length === 0) return ok([]);
 

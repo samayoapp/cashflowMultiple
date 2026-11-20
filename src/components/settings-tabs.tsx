@@ -3,7 +3,7 @@
 /** Pestañas de Ajustes (por unidad de negocio) y Configuración (toda la aplicación). */
 
 import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from 'react';
-import { Archive, ArchiveRestore, Copy, GripVertical, KeyRound, Lock, Pencil, Plus, Scale, Star, Trash2, Webhook } from 'lucide-react';
+import { Archive, ArchiveRestore, Copy, GripVertical, KeyRound, Lock, Merge, Pencil, Plus, Scale, Star, Trash2, Webhook } from 'lucide-react';
 import {
   closestCenter,
   DndContext,
@@ -37,6 +37,301 @@ function useAction() {
       return false;
     }
   };
+}
+
+// ---------------------------------------------------------------- Categorías
+interface CategoryRow {
+  id: string;
+  entityId: string;
+  name: string;
+  direction: 'IN' | 'OUT';
+  color: string | null;
+  uses: { obligations: number; rules: number; cardCharges: number };
+}
+
+const CATEGORY_PALETTE = ['#10b981', '#6366f1', '#f59e0b', '#ef4444', '#06b6d4', '#8b5cf6', '#ec4899', '#84cc16', '#64748b'];
+
+const usesOf = (c: CategoryRow) => c.uses.obligations + c.uses.rules + c.uses.cardCharges;
+function usesLabel(c: CategoryRow) {
+  const parts = [
+    c.uses.obligations && `${c.uses.obligations} partida${c.uses.obligations === 1 ? '' : 's'}`,
+    c.uses.rules && `${c.uses.rules} recurrente${c.uses.rules === 1 ? '' : 's'}`,
+    c.uses.cardCharges && `${c.uses.cardCharges} consumo${c.uses.cardCharges === 1 ? '' : 's'} de tarjeta`,
+  ].filter(Boolean);
+  return parts.length ? parts.join(' · ') : 'Sin uso';
+}
+
+/** Catálogo de categorías de gastos e ingresos de cada unidad (para etiquetar y analizar movimientos). */
+export function CategoriesTab() {
+  const app = useApp();
+  const act = useAction();
+  const { data, error, loading } = useApi<CategoryRow[]>(`/api/categories?ctx=${encodeURIComponent(app.ctx)}`);
+  const [form, setForm] = useState<{ open: boolean; category: CategoryRow | null; direction: 'IN' | 'OUT' }>({
+    open: false,
+    category: null,
+    direction: 'OUT',
+  });
+  const [merging, setMerging] = useState<CategoryRow | null>(null);
+  const consolidated = !app.currentEntity;
+
+  async function remove(c: CategoryRow) {
+    const n = usesOf(c);
+    if (
+      !(await confirmDialog({
+        title: 'Eliminar categoría',
+        message: n
+          ? `"${c.name}" se usa en ${usesLabel(c)}. Si la eliminas, todo eso queda "Sin categoría" (no se borra ningún movimiento). Si quieres conservar la etiqueta, mejor usa "Fusionar".`
+          : `¿Eliminar la categoría "${c.name}"?`,
+        confirmLabel: 'Eliminar',
+        tone: 'danger',
+      }))
+    )
+      return;
+    await act(() => api(`/api/categories/${c.id}`, { method: 'DELETE' }), 'Categoría eliminada');
+  }
+
+  const section = (direction: 'IN' | 'OUT') => {
+    const rows = (data ?? []).filter((c) => c.direction === direction);
+    return (
+      <Card className="p-0 sm:p-0">
+        <div className="flex items-center justify-between border-b border-slate-200 p-3 dark:border-slate-800">
+          <div>
+            <h2 className="font-semibold">{direction === 'OUT' ? 'Categorías de gastos' : 'Categorías de ingresos'}</h2>
+            <p className="text-xs text-slate-500">
+              {direction === 'OUT' ? 'Para CxP, gastos recurrentes y consumos con tarjeta.' : 'Para CxC e ingresos recurrentes.'}
+            </p>
+          </div>
+          <Button variant="primary" onClick={() => setForm({ open: true, category: null, direction })}>
+            <Plus className="h-4 w-4" /> Nueva
+          </Button>
+        </div>
+        {!rows.length ? (
+          <EmptyState title="Sin categorías">
+            {direction === 'OUT' ? 'Ej.: Planilla, Alquiler, Inventario, Publicidad, Servicios públicos…' : 'Ej.: Ventas de contado, Servicios, Comisiones…'}
+          </EmptyState>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead className="bg-slate-50 dark:bg-slate-800/50">
+                <tr>
+                  <th className="th">Categoría</th>
+                  {consolidated && <th className="th">Unidad de negocio</th>}
+                  <th className="th">Uso</th>
+                  <th className="th text-right">Acciones</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((c) => {
+                  const e = app.entityById.get(c.entityId);
+                  return (
+                    <tr key={c.id} className="border-t border-slate-100 dark:border-slate-800">
+                      <td className="td">
+                        <span className="inline-flex items-center gap-2 font-medium">
+                          <span className="h-3 w-3 shrink-0 rounded-full" style={{ backgroundColor: c.color ?? '#94a3b8' }} />
+                          {c.name}
+                        </span>
+                      </td>
+                      {consolidated && (
+                        <td className="td">
+                          <span className="inline-flex items-center gap-1.5">
+                            {e && <EntityDot color={e.color} />} {e?.name}
+                          </span>
+                        </td>
+                      )}
+                      <td className="td text-sm text-slate-500">{usesLabel(c)}</td>
+                      <td className="td">
+                        <div className="flex justify-end gap-1">
+                          <Button size="sm" variant="ghost" title="Renombrar / color" onClick={() => setForm({ open: true, category: c, direction })}>
+                            <Pencil className="h-4 w-4" />
+                          </Button>
+                          <Button size="sm" variant="ghost" title="Fusionar en otra categoría (pasa todo lo etiquetado)" onClick={() => setMerging(c)}>
+                            <Merge className="h-4 w-4" />
+                          </Button>
+                          <Button size="sm" variant="ghost" title="Eliminar" onClick={() => remove(c)}>
+                            <Trash2 className="h-4 w-4 text-rose-500" />
+                          </Button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+    );
+  };
+
+  return (
+    <div className="space-y-4">
+      {error ? (
+        <ErrorBox message={error} />
+      ) : loading && !data ? (
+        <Loading />
+      ) : (
+        <div className="grid gap-4 lg:grid-cols-2">
+          {section('OUT')}
+          {section('IN')}
+        </div>
+      )}
+      <CategoryFormModal
+        open={form.open}
+        onClose={() => setForm((f) => ({ ...f, open: false }))}
+        category={form.category}
+        direction={form.direction}
+      />
+      <CategoryMergeModal source={merging} all={data ?? []} onClose={() => setMerging(null)} />
+    </div>
+  );
+}
+
+function CategoryFormModal({
+  open,
+  onClose,
+  category,
+  direction,
+}: {
+  open: boolean;
+  onClose: () => void;
+  category: CategoryRow | null;
+  direction: 'IN' | 'OUT';
+}) {
+  const app = useApp();
+  const act = useAction();
+  const [entityId, setEntityId] = useState('');
+  const [name, setName] = useState('');
+  const [color, setColor] = useState(CATEGORY_PALETTE[0]);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    setError(null);
+    setEntityId(category?.entityId ?? app.currentEntity?.id ?? app.activeEntities[0]?.id ?? '');
+    setName(category?.name ?? '');
+    setColor(category?.color ?? CATEGORY_PALETTE[Math.floor(Math.random() * CATEGORY_PALETTE.length)]);
+  }, [open, category, app.currentEntity, app.activeEntities]);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setSaving(true);
+    setError(null);
+    try {
+      if (category) await api(`/api/categories/${category.id}`, { method: 'PATCH', body: { name, color } });
+      else await api('/api/categories', { body: { entityId, name, direction, color } });
+      await act(async () => undefined, category ? 'Categoría actualizada' : 'Categoría creada');
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Error');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const kind = direction === 'OUT' ? 'gasto' : 'ingreso';
+  return (
+    <Modal open={open} onClose={onClose} title={category ? `Editar categoría: ${category.name}` : `Nueva categoría de ${kind}`}>
+      <form onSubmit={submit} className="space-y-3">
+        {error && <ErrorBox message={error} />}
+        {!category && !app.currentEntity && (
+          <Field label="Unidad de negocio">
+            <select className="input" value={entityId} onChange={(e) => setEntityId(e.target.value)} required>
+              {app.activeEntities.map((u) => (
+                <option key={u.id} value={u.id}>
+                  {u.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
+        <Field label="Nombre">
+          <input className="input" value={name} onChange={(e) => setName(e.target.value)} required maxLength={80} autoFocus />
+        </Field>
+        <Field label="Color (para gráficos y reportes)">
+          <div className="flex flex-wrap items-center gap-2">
+            {CATEGORY_PALETTE.map((c) => (
+              <button
+                type="button"
+                key={c}
+                onClick={() => setColor(c)}
+                className="h-7 w-7 rounded-full ring-offset-2 dark:ring-offset-slate-900"
+                style={{ backgroundColor: c, boxShadow: color === c ? `0 0 0 2px ${c}` : undefined }}
+                aria-label={c}
+              />
+            ))}
+            <input type="color" value={color} onChange={(e) => setColor(e.target.value)} className="h-7 w-10 cursor-pointer rounded" />
+          </div>
+        </Field>
+        {category && usesOf(category) > 0 && (
+          <p className="text-xs text-slate-500">Lo ya etiquetado ({usesLabel(category)}) toma el nuevo nombre automáticamente.</p>
+        )}
+        <div className="flex justify-end gap-2 pt-2">
+          <Button type="button" onClick={onClose}>
+            Cancelar
+          </Button>
+          <Button type="submit" variant="primary" loading={saving}>
+            {category ? 'Guardar' : 'Crear'}
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+/** Fusiona una categoría en otra (misma unidad y tipo): pasa todo lo etiquetado y elimina la original. */
+function CategoryMergeModal({ source, all, onClose }: { source: CategoryRow | null; all: CategoryRow[]; onClose: () => void }) {
+  const act = useAction();
+  const [target, setTarget] = useState('');
+  const [saving, setSaving] = useState(false);
+  const candidates = useMemo(
+    () => (source ? all.filter((c) => c.id !== source.id && c.entityId === source.entityId && c.direction === source.direction) : []),
+    [all, source],
+  );
+  useEffect(() => setTarget(candidates[0]?.id ?? ''), [candidates]);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!source || !target) return;
+    setSaving(true);
+    const ok = await act(() => api(`/api/categories/${source.id}`, { method: 'DELETE', body: { mergeInto: target } }), 'Categorías fusionadas');
+    setSaving(false);
+    if (ok) onClose();
+  }
+
+  return (
+    <Modal open={Boolean(source)} onClose={onClose} title={`Fusionar "${source?.name ?? ''}"`}>
+      <form onSubmit={submit} className="space-y-3">
+        {!candidates.length ? (
+          <ErrorBox message="No hay otra categoría del mismo tipo en esta unidad para fusionar." />
+        ) : (
+          <>
+            <p className="text-sm text-slate-600 dark:text-slate-400">
+              Todo lo etiquetado con «{source?.name}» ({source ? usesLabel(source) : ''}) pasa a la categoría elegida, y «{source?.name}» se elimina.
+              Útil para limpiar duplicadas (p. ej. «Gasolina» y «Combustible»).
+            </p>
+            <Field label="Pasar todo a">
+              <select className="input" value={target} onChange={(e) => setTarget(e.target.value)} required>
+                {candidates.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          </>
+        )}
+        <div className="flex justify-end gap-2 pt-2">
+          <Button type="button" onClick={onClose}>
+            Cancelar
+          </Button>
+          <Button type="submit" variant="primary" loading={saving} disabled={!candidates.length}>
+            Fusionar
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
 }
 
 // ---------------------------------------------------------------- Cuentas

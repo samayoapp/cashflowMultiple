@@ -5,6 +5,7 @@ import { ArrowLeftRight, Ban, Building2, CalendarClock, CheckCircle2, ChevronDow
 import { useApp } from '@/components/AppContext';
 import { Badge, Button, Card, cn, confirmDialog, EmptyState, ErrorBox, Loading, TableTotals, Tabs, Toggle, useToast } from '@/components/ui';
 import { EntityDot } from '@/components/AppShell';
+import { CategoryTag } from '@/components/CategorySelect';
 import {
   ExecuteTransferModal,
   InterUnitEditModal,
@@ -115,6 +116,8 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
   const [q, setQ] = useState('');
   const [query, setQuery] = useState('');
   const [origin, setOrigin] = useState<'all' | 'single' | 'recurring'>('all');
+  /** '' = todas, 'none' = sin categoría, o el id. */
+  const [category, setCategory] = useState('');
   const [period, setPeriod] = useState<PeriodKey>('all');
   const [custom, setCustom] = useState({ from: '', to: '' });
   const range = periodRange(period, app.today, custom);
@@ -125,7 +128,12 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
   if (query) params.set('q', query);
   if (range.from) params.set('from', range.from);
   if (range.to) params.set('to', range.to);
+  if (category) params.set('category', category);
   const { data, error, loading } = useApi<ObligationDto[]>(`/api/obligations?${params}`);
+  const catalog = useApi<{ categories: { id: string; entityId: string; name: string; direction: 'IN' | 'OUT' }[] }>(
+    `/api/catalog?ctx=${encodeURIComponent(app.ctx)}`,
+  );
+  const categoryOptions = (catalog.data?.categories ?? []).filter((c) => c.direction === direction);
   // Próximas ocurrencias de recurrencias que aún no existen como CxC/CxP
   // y también las fechas PASADAS que nunca se registraron (desde el inicio del período, o 1 año atrás)
   const showUpcoming = status !== 'closed' && origin !== 'single';
@@ -161,6 +169,7 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
             (u) =>
               (app.whatIf || !u.isHypothetical) &&
               (priority === 'ALL' || u.priority === priority) &&
+              (!category || (category === 'none' ? !u.category : u.category?.id === category)) &&
               (!range.from || u.date >= range.from) &&
               (!range.to || u.date <= range.to),
           )
@@ -169,7 +178,7 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
     // Orden estable: a igual fecha, la partida real antes que la proyectada
     const dir = order === 'asc' ? 1 : -1;
     return [...obs, ...ups].sort((a, b) => (a.date < b.date ? -dir : a.date > b.date ? dir : 0));
-  }, [data, upcoming.data, showUpcoming, priority, origin, app.whatIf, range.from, range.to, order]);
+  }, [data, upcoming.data, showUpcoming, priority, origin, category, app.whatIf, range.from, range.to, order]);
 
   /** Totales del período por moneda (sin hipotéticas ni canceladas). */
   const totals = useMemo(() => {
@@ -362,6 +371,16 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
             <input className="input w-auto" type="date" value={custom.to} onChange={(e) => setCustom((c) => ({ ...c, to: e.target.value }))} aria-label="Hasta" />
           </span>
         )}
+        <select className="input w-auto" value={category} onChange={(e) => setCategory(e.target.value)} title="Categoría">
+          <option value="">Toda categoría</option>
+          <option value="none">Sin categoría</option>
+          {categoryOptions.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.name}
+              {app.ctx === 'all' ? ` · ${app.entityById.get(c.entityId)?.name ?? ''}` : ''}
+            </option>
+          ))}
+        </select>
         {!isIn && (
           <select className="input w-auto" value={priority} onChange={(e) => setPriority(e.target.value as typeof priority)}>
             <option value="ALL">Toda prioridad</option>
@@ -475,6 +494,7 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
                         </div>
                         <div className="flex flex-wrap items-center gap-1 text-xs text-slate-500">
                           {u.counterparty?.name ?? 'Sin contraparte'}
+                          <CategoryTag category={u.category} />
                           <Badge tone="blue">Recurrente · {FREQ[u.frequency]}</Badge>
                           {u.isHypothetical && <Badge tone="violet">Hipotética</Badge>}
                           {!isIn && <Badge tone={u.priority === 'FIXED' ? 'amber' : 'slate'}>{u.priority === 'FIXED' ? 'Inamovible' : 'Flexible'}</Badge>}
@@ -541,6 +561,7 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
                       </div>
                       <div className="flex flex-wrap items-center gap-1 text-xs text-slate-500">
                         {o.counterparty?.name ?? 'Sin contraparte'}
+                        <CategoryTag category={o.category} />
                         {o.expenseDate && <Badge>Gasto del {formatDateYear(o.expenseDate, app.today)}</Badge>}
                         {o.isHypothetical && <Badge tone="violet">Hipotética</Badge>}
                         {o.recurrenceId && <Badge tone="blue">Recurrente</Badge>}
@@ -761,7 +782,10 @@ function RulesTab() {
                         {r.direction === 'OUT' && r.priority === 'FIXED' && <Badge tone="amber">Inamovible</Badge>}
                         {r.isHypothetical && <Badge tone="violet">Hipotética</Badge>}
                       </div>
-                      <div className="text-xs text-slate-500">{r.counterparty?.name ?? ''}</div>
+                      <div className="flex flex-wrap items-center gap-1 text-xs text-slate-500">
+                        {r.counterparty?.name ?? ''}
+                        <CategoryTag category={r.category} />
+                      </div>
                     </td>
                     <td className="td">{r.direction === 'IN' ? <Badge tone="green">Ingreso</Badge> : <Badge tone="red">Gasto</Badge>}</td>
                     <td className="td">{FREQ[r.frequency]}</td>

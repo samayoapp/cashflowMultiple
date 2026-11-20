@@ -46,7 +46,7 @@ export type AccountDto = ReturnType<typeof accountDto>;
 export const obligationInclude = {
   payments: { orderBy: { date: 'asc' as const }, include: { account: { select: { name: true, type: true } } } },
   counterparty: { select: { id: true, name: true } },
-  category: { select: { id: true, name: true } },
+  category: { select: { id: true, name: true, color: true } },
   transfer: { select: { id: true, fromEntityId: true, toEntityId: true, repaymentOfId: true, isReimbursement: true, status: true } },
 } satisfies Prisma.ObligationInclude;
 
@@ -103,7 +103,7 @@ export type ObligationDto = ReturnType<typeof obligationDto>;
 
 export const ruleInclude = {
   counterparty: { select: { id: true, name: true } },
-  category: { select: { id: true, name: true } },
+  category: { select: { id: true, name: true, color: true } },
 } satisfies Prisma.RecurringRuleInclude;
 
 export function ruleDto(r: Prisma.RecurringRuleGetPayload<{ include: typeof ruleInclude }>) {

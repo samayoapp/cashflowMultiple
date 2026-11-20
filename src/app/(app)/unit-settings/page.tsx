@@ -4,9 +4,9 @@ import { useState } from 'react';
 import { useApp } from '@/components/AppContext';
 import { EntityDot } from '@/components/AppShell';
 import { Tabs } from '@/components/ui';
-import { AccountsTab, UnitTab } from '@/components/settings-tabs';
+import { AccountsTab, CategoriesTab, UnitTab } from '@/components/settings-tabs';
 
-type Tab = 'accounts' | 'unit';
+type Tab = 'accounts' | 'categories' | 'unit';
 
 /** Ajustes de la unidad de negocio seleccionada en el menú superior. */
 export default function UnitSettingsPage() {
@@ -32,6 +32,7 @@ export default function UnitSettingsPage() {
         <Tabs<Tab>
           tabs={[
             { id: 'accounts', label: 'Cuentas y tarjetas' },
+            { id: 'categories', label: 'Categorías' },
             { id: 'unit', label: 'Datos e integración' },
           ]}
           value={tab}
@@ -39,6 +40,7 @@ export default function UnitSettingsPage() {
         />
       </div>
       {tab === 'accounts' && <AccountsTab />}
+      {tab === 'categories' && <CategoriesTab />}
       {tab === 'unit' && <UnitTab />}
     </div>
   );

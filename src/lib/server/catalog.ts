@@ -1,5 +1,5 @@
 import type { Prisma } from '@prisma/client';
-import { badRequest } from './api';
+import { badRequest, conflict } from './api';
 
 type Db = Prisma.TransactionClient;
 
@@ -37,3 +37,26 @@ export async function assertCategory(db: Db, entityId: string, categoryId: strin
   if (!c || c.entityId !== entityId) throw badRequest('La categoría no pertenece a la unidad de negocio');
   return c.id;
 }
+
+const HEX = /^#[0-9a-fA-F]{6}$/;
+
+/** Crea una categoría validando que no exista otra igual (mismo nombre y tipo) en la unidad. */
+export async function createCategory(
+  db: Db,
+  args: { entityId: string; name: string; direction: 'IN' | 'OUT'; color?: string | null },
+) {
+  const name = args.name.trim();
+  if (!name) throw badRequest('El nombre no puede quedar vacío');
+  if (args.color && !HEX.test(args.color)) throw badRequest('Color inválido');
+  await assertCategoryNameFree(db, args.entityId, args.direction, name);
+  return db.category.create({ data: { entityId: args.entityId, name, direction: args.direction, color: args.color ?? null } });
+}
+
+export async function assertCategoryNameFree(db: Db, entityId: string, direction: 'IN' | 'OUT', name: string, exceptId?: string) {
+  const dup = await db.category.findFirst({
+    where: { entityId, direction, name: { equals: name.trim(), mode: 'insensitive' }, ...(exceptId ? { id: { not: exceptId } } : {}) },
+  });
+  if (dup) throw conflict(`Ya existe la categoría "${dup.name}" en esta unidad`);
+}
+
+export { HEX as CATEGORY_COLOR };
