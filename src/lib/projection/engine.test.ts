@@ -283,6 +283,18 @@ describe('recurrencias', () => {
     expect(r.items.filter((i) => i.source === 'RECURRENCE').length).toBeGreaterThan(0);
   });
 
+  it('una recurrencia hipotética solo se proyecta en Modo Simulación', () => {
+    const hypo = { ...rule, isHypothetical: true };
+    const real = project(input({ rules: [hypo] }));
+    expect(real.items.filter((i) => i.source === 'RECURRENCE')).toHaveLength(0);
+    const sim = project(input({ rules: [hypo], whatIf: true }));
+    const items = sim.items.filter((i) => i.source === 'RECURRENCE');
+    expect(items.length).toBeGreaterThan(0);
+    expect(items.every((i) => i.isHypothetical)).toBe(true);
+    // Una recurrencia real sigue proyectándose como no hipotética en ambos modos
+    expect(project(input({ rules: [rule], whatIf: true })).items.filter((i) => i.source === 'RECURRENCE').every((i) => !i.isHypothetical)).toBe(true);
+  });
+
   it('respeta endDate y reglas inactivas', () => {
     expect(expandRule({ ...rule, endDate: '2026-11-20' }, '2026-11-12', '2026-12-31')).toEqual(['2026-11-13']);
     expect(expandRule({ ...rule, active: false }, '2026-11-12', '2026-12-31')).toEqual([]);

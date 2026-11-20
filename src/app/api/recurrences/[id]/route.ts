@@ -19,6 +19,8 @@ const schema = z.object({
   endDate: isoDate.optional().nullable(),
   priority: priority.optional(),
   active: z.boolean().optional(),
+  /** Hipotética (solo simulación) ↔ real. También cambia sus fechas ya materializadas sin abonos. */
+  isHypothetical: z.boolean().optional(),
   /** Nombre de cliente/proveedor; null o vacío la quita, undefined no la toca. */
   counterpartyName: z.string().trim().max(160).optional().nullable(),
 });
@@ -44,6 +46,13 @@ export const PATCH = route<{ params: { id: string } }>(async (req, { params }) =
             { counterpartyName: data.counterpartyName || null },
             r.direction === 'IN' ? 'CUSTOMER' : 'SUPPLIER',
           );
+    if (data.isHypothetical !== undefined && data.isHypothetical !== r.isHypothetical) {
+      // Las fechas ya materializadas y sin abonos siguen a la regla (las que tienen abonos son reales)
+      await tx.obligation.updateMany({
+        where: { recurrenceId: r.id, status: { in: ['OPEN', 'CANCELLED'] }, payments: { none: {} } },
+        data: { isHypothetical: data.isHypothetical },
+      });
+    }
     return tx.recurringRule.update({
       where: { id: r.id },
       data: {
@@ -54,6 +63,7 @@ export const PATCH = route<{ params: { id: string } }>(async (req, { params }) =
         endDate: data.endDate === undefined ? undefined : data.endDate ? dbDate(data.endDate) : null,
         priority: data.priority,
         active: data.active,
+        isHypothetical: data.isHypothetical,
         counterpartyId,
       },
       include: ruleInclude,

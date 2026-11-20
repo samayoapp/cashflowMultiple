@@ -152,6 +152,7 @@ export async function materializeOccurrence(ruleId: string, date: ISODate, userI
         categoryId: rule.categoryId,
         recurrenceId: rule.id,
         occurrenceDate: dbDate(date),
+        isHypothetical: rule.isHypothetical,
         createdById: userId,
       },
     });

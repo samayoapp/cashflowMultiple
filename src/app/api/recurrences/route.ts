@@ -33,6 +33,8 @@ const createSchema = z.object({
   counterpartyId: id.optional().nullable(),
   counterpartyName: z.string().trim().max(160).optional().nullable(),
   categoryId: id.optional().nullable(),
+  /** Solo se proyecta en modo simulación. */
+  isHypothetical: z.boolean().default(false),
 });
 
 export const POST = route(async (req) => {
@@ -60,6 +62,7 @@ export const POST = route(async (req) => {
         priority: data.priority,
         counterpartyId: counterpartyId ?? null,
         categoryId: categoryId ?? null,
+        isHypothetical: data.isHypothetical,
       },
       include,
     });

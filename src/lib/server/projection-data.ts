@@ -179,6 +179,7 @@ export async function loadProjectionInput(ctx: ResolvedContext, whatIf: boolean)
     endDate: isoOrNull(r.endDate),
     priority: r.priority,
     active: r.active,
+    isHypothetical: r.isHypothetical,
     counterpartyName: r.counterparty?.name ?? null,
     categoryName: r.category?.name ?? null,
   }));

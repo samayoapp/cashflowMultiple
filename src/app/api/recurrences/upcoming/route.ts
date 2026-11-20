@@ -73,12 +73,16 @@ export const GET = route(async (req) => {
     endDate: isoOrNull(r.endDate),
     priority: r.priority,
     active: r.active,
+    isHypothetical: r.isHypothetical,
     counterparty: r.counterparty,
     category: r.category,
   }));
 
   return ok<UpcomingOccurrenceDto[]>(
-    pendingOccurrences(engineRules, materialized, from, to).map(({ rule, date }) => ({
+    pendingOccurrences(engineRules, materialized, from, to)
+      // Una hipotética nunca queda "sin registrar" en el pasado: solo proyecta hacia adelante
+      .filter(({ rule, date }) => !(rule.isHypothetical && date < today))
+      .map(({ rule, date }) => ({
       key: `${rule.id}:${date}`,
       ruleId: rule.id,
       entityId: rule.entityId,
@@ -91,6 +95,7 @@ export const GET = route(async (req) => {
       counterparty: rule.counterparty,
       category: rule.category,
       past: date < today,
+      isHypothetical: rule.isHypothetical,
     })),
   );
 });

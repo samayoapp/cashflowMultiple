@@ -103,6 +103,8 @@ export interface EngineRule {
   endDate: ISODate | null;
   priority: Priority;
   active: boolean;
+  /** Solo se proyecta en modo simulación. */
+  isHypothetical?: boolean;
   counterpartyName?: string | null;
   categoryName?: string | null;
 }

@@ -1088,6 +1088,7 @@ export function RecurrenceFormModal({
   const [startDate, setStartDate] = useState(app.today);
   const [endDate, setEndDate] = useState('');
   const [priority, setPriority] = useState<'FIXED' | 'FLEXIBLE'>('FIXED');
+  const [isHypothetical, setIsHypothetical] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -1102,6 +1103,7 @@ export function RecurrenceFormModal({
       setStartDate(rule.startDate);
       setEndDate(rule.endDate ?? '');
       setPriority(rule.priority);
+      setIsHypothetical(rule.isHypothetical);
       return;
     }
     setEntityId(defaultEntity);
@@ -1113,7 +1115,9 @@ export function RecurrenceFormModal({
     setStartDate(app.today);
     setEndDate('');
     setPriority('FIXED');
-  }, [open, rule, defaultDirection, defaultEntity, app.today, setError]);
+    // En Modo Simulación, lo nuevo nace hipotético
+    setIsHypothetical(app.whatIf);
+  }, [open, rule, defaultDirection, defaultEntity, app.today, app.whatIf, setError]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -1128,13 +1132,18 @@ export function RecurrenceFormModal({
       endDate: endDate || null,
       priority,
       counterpartyName: counterparty.trim() || null,
+      isHypothetical,
     };
     const ok = await run(
       () =>
         rule
           ? api(`/api/recurrences/${rule.id}`, { method: 'PATCH', body: common })
           : api('/api/recurrences', { body: { entityId, direction, ...common } }),
-      rule ? 'Recurrencia actualizada' : 'Recurrencia creada',
+      rule
+        ? 'Recurrencia actualizada'
+        : isHypothetical
+          ? `Recurrencia hipotética creada${app.whatIf ? '' : ' (actívala en Modo Simulación para verla)'}`
+          : 'Recurrencia creada',
     );
     if (ok) onClose();
   }
@@ -1193,6 +1202,19 @@ export function RecurrenceFormModal({
               <option value="FLEXIBLE">Flexible / negociable</option>
             </select>
           </Field>
+        )}
+        <Toggle
+          tone="violet"
+          checked={isHypothetical}
+          onChange={setIsHypothetical}
+          label={<span className="text-sm">Hipotética (solo se proyecta en Modo Simulación)</span>}
+        />
+        {editing && rule && rule.isHypothetical !== isHypothetical && (
+          <p className="text-xs text-violet-700 dark:text-violet-300">
+            {isHypothetical
+              ? 'Pasará a ser hipotética: sus fechas pendientes dejan de proyectarse fuera de la simulación.'
+              : 'Pasará a ser real: sus fechas se proyectan siempre, también fuera de la simulación.'}
+          </p>
         )}
         {editing && (
           <p className="text-xs text-slate-500">

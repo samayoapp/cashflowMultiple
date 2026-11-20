@@ -325,6 +325,8 @@ model RecurringRule {
   counterpartyId String?
   categoryId     String?
   active         Boolean       @default(true)
+  /// Solo se proyecta en modo simulación (what-if)
+  isHypothetical Boolean       @default(false)
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
   entity         Entity        @relation(fields: [entityId], references: [id], onDelete: Restrict)

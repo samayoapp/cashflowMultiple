@@ -159,6 +159,7 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
       ? (upcoming.data ?? [])
           .filter(
             (u) =>
+              (app.whatIf || !u.isHypothetical) &&
               (priority === 'ALL' || u.priority === priority) &&
               (!range.from || u.date >= range.from) &&
               (!range.to || u.date <= range.to),
@@ -475,6 +476,7 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
                         <div className="flex flex-wrap items-center gap-1 text-xs text-slate-500">
                           {u.counterparty?.name ?? 'Sin contraparte'}
                           <Badge tone="blue">Recurrente · {FREQ[u.frequency]}</Badge>
+                          {u.isHypothetical && <Badge tone="violet">Hipotética</Badge>}
                           {!isIn && <Badge tone={u.priority === 'FIXED' ? 'amber' : 'slate'}>{u.priority === 'FIXED' ? 'Inamovible' : 'Flexible'}</Badge>}
                         </div>
                       </td>
@@ -496,12 +498,16 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
                       </td>
                       <td className="td">
                         <div className="flex justify-end gap-0.5">
-                          <Button size="sm" variant="ghost" disabled={dis} title={isIn ? 'Marcar cobrado' : 'Marcar pagado'} onClick={() => onUpcoming(u, 'pay')}>
-                            <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-                          </Button>
-                          <Button size="sm" variant="ghost" disabled={dis} title="Abono parcial" onClick={() => onUpcoming(u, 'partial')}>
-                            <Coins className="h-4 w-4" />
-                          </Button>
+                          {!u.isHypothetical && (
+                            <>
+                              <Button size="sm" variant="ghost" disabled={dis} title={isIn ? 'Marcar cobrado' : 'Marcar pagado'} onClick={() => onUpcoming(u, 'pay')}>
+                                <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                              </Button>
+                              <Button size="sm" variant="ghost" disabled={dis} title="Abono parcial" onClick={() => onUpcoming(u, 'partial')}>
+                                <Coins className="h-4 w-4" />
+                              </Button>
+                            </>
+                          )}
                           <Button size="sm" variant="ghost" disabled={dis} title="Reprogramar esta fecha" onClick={() => onUpcoming(u, 'move')}>
                             <CalendarClock className="h-4 w-4" />
                           </Button>
@@ -743,6 +749,7 @@ function RulesTab() {
                         {app.ctx === 'all' && e && <EntityDot color={e.color} />}
                         <span className="font-medium">{r.description}</span>
                         {r.direction === 'OUT' && r.priority === 'FIXED' && <Badge tone="amber">Inamovible</Badge>}
+                        {r.isHypothetical && <Badge tone="violet">Hipotética</Badge>}
                       </div>
                       <div className="text-xs text-slate-500">{r.counterparty?.name ?? ''}</div>
                     </td>
@@ -768,9 +775,15 @@ function RulesTab() {
             </tbody>
             <TableTotals
               rows={data}
-              note={data.some((r) => !r.active) ? 'solo activas, por ocurrencia' : 'por ocurrencia'}
+              note={[
+                data.some((r) => !r.active) && 'solo activas',
+                !app.whatIf && data.some((r) => r.isHypothetical) && 'sin hipotéticas',
+                'por ocurrencia',
+              ]
+                .filter(Boolean)
+                .join(', ')}
               noun={['recurrencia', 'recurrencias']}
-              section={(r) => (!r.active ? false : r.direction === 'IN' ? 'Ingresos' : 'Gastos')}
+              section={(r) => (!r.active || (r.isHypothetical && !app.whatIf) ? false : r.direction === 'IN' ? 'Ingresos' : 'Gastos')}
               columns={[null, null, null, null, null, (r) => ({ amount: r.amount, currency: app.entityById.get(r.entityId)?.currency ?? 'HNL' }), null, null]}
             />
           </table>

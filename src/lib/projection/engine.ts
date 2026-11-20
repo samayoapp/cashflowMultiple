@@ -117,6 +117,7 @@ export function project(input: ProjectionInput): ProjectionResult {
 
   // 2. Recurrencias virtuales (desde hoy)
   for (const { rule, date } of pendingOccurrences(input.rules, materialized, today, horizonEnd)) {
+    if (rule.isHypothetical && !whatIf) continue;
     const entity = entities.get(rule.entityId);
     if (!entity) continue;
     const amount = toOut(rule.amount, rule.entityId);
@@ -139,7 +140,7 @@ export function project(input: ProjectionInput): ProjectionResult {
       dueDate: date,
       overdue: false,
       priority: rule.priority,
-      isHypothetical: false,
+      isHypothetical: Boolean(rule.isHypothetical),
       simulated: false,
       transferId: null,
       status: 'PROJECTED',

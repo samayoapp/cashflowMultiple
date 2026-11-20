@@ -118,6 +118,8 @@ export function ruleDto(r: Prisma.RecurringRuleGetPayload<{ include: typeof rule
     endDate: isoOrNull(r.endDate),
     priority: r.priority,
     active: r.active,
+    /** Solo se proyecta en modo simulación. */
+    isHypothetical: r.isHypothetical,
     counterparty: r.counterparty,
     category: r.category,
   };
@@ -139,6 +141,8 @@ export interface UpcomingOccurrenceDto {
   category: RuleDto['category'];
   /** Fecha ya pasada que nunca se registró como cobro/pago. */
   past: boolean;
+  /** Viene de una recurrencia hipotética (solo para simulación). */
+  isHypothetical: boolean;
 }
 
 export const transferInclude = {
