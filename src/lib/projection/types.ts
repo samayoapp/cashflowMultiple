@@ -3,7 +3,7 @@ import type { Cents } from '@/lib/money';
 
 export type Direction = 'IN' | 'OUT';
 export type Priority = 'FIXED' | 'FLEXIBLE';
-export type Frequency = 'WEEKLY' | 'BIWEEKLY' | 'MONTHLY' | 'YEARLY';
+export type Frequency = 'DAILY' | 'WEEKLY' | 'BIWEEKLY' | 'MONTHLY' | 'YEARLY';
 export type ObligationStatus = 'OPEN' | 'PARTIAL' | 'SETTLED' | 'CANCELLED';
 
 export interface EngineEntity {

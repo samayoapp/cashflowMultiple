@@ -29,7 +29,7 @@ export const hexColor = z.string().regex(/^#[0-9a-fA-F]{6}$/, 'Color inválido (
 
 export const direction = z.enum(['IN', 'OUT']);
 export const priority = z.enum(['FIXED', 'FLEXIBLE']);
-export const frequency = z.enum(['WEEKLY', 'BIWEEKLY', 'MONTHLY', 'YEARLY']);
+export const frequency = z.enum(['DAILY', 'WEEKLY', 'BIWEEKLY', 'MONTHLY', 'YEARLY']);
 export const id = z.string().min(1).max(64);
 export const shortText = (max = 200) => z.string().trim().min(1, 'Requerido').max(max);
 export const optionalText = (max = 500) =>

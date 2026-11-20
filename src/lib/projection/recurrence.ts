@@ -1,4 +1,4 @@
-import { addDays, addMonths, toUTCDate, type ISODate } from '@/lib/dates';
+import { addDays, addMonths, diffDays, toUTCDate, type ISODate } from '@/lib/dates';
 import type { EngineRule } from './types';
 
 /**
@@ -12,10 +12,13 @@ export function expandRule(rule: EngineRule, from: ISODate, to: ISODate): ISODat
 
   const anchorDay = toUTCDate(rule.startDate).getUTCDate();
   const out: ISODate[] = [];
-  let i = 0;
-  let current = rule.startDate;
-  // Límite defensivo: 20 años de ocurrencias semanales
-  while (current <= end && i < 1100) {
+  // Frecuencias de paso fijo: se salta directo a la primera ocurrencia del rango
+  // (una regla diaria de hace años no recorre todas sus fechas viejas).
+  const step = STEP_DAYS[rule.frequency];
+  let i = step && from > rule.startDate ? Math.ceil(diffDays(from, rule.startDate) / step) : 0;
+  let current = nth(rule, i, anchorDay);
+  // Límite defensivo de ocurrencias devueltas (más de 3 años de diarias)
+  while (current <= end && out.length < 1200) {
     if (current >= from) out.push(current);
     i += 1;
     current = nth(rule, i, anchorDay);
@@ -23,8 +26,13 @@ export function expandRule(rule: EngineRule, from: ISODate, to: ISODate): ISODat
   return out;
 }
 
+/** Días entre ocurrencias de las frecuencias de paso fijo. */
+const STEP_DAYS: Partial<Record<EngineRule['frequency'], number>> = { DAILY: 1, WEEKLY: 7, BIWEEKLY: 14 };
+
 function nth(rule: EngineRule, i: number, anchorDay: number): ISODate {
   switch (rule.frequency) {
+    case 'DAILY':
+      return addDays(rule.startDate, i);
     case 'WEEKLY':
       return addDays(rule.startDate, 7 * i);
     case 'BIWEEKLY':

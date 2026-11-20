@@ -1172,6 +1172,7 @@ export function RecurrenceFormModal({
         <div className="grid grid-cols-3 gap-3">
           <Field label="Frecuencia">
             <select className="input" value={frequency} onChange={(e) => setFrequency(e.target.value)}>
+              <option value="DAILY">Diaria</option>
               <option value="WEEKLY">Semanal</option>
               <option value="BIWEEKLY">Quincenal</option>
               <option value="MONTHLY">Mensual</option>

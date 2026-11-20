@@ -671,7 +671,7 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
   );
 }
 
-const FREQ: Record<string, string> = { WEEKLY: 'Semanal', BIWEEKLY: 'Quincenal', MONTHLY: 'Mensual', YEARLY: 'Anual' };
+const FREQ: Record<string, string> = { DAILY: 'Diaria', WEEKLY: 'Semanal', BIWEEKLY: 'Quincenal', MONTHLY: 'Mensual', YEARLY: 'Anual' };
 
 function RulesTab() {
   const app = useApp();

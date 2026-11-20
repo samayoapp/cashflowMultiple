@@ -42,6 +42,7 @@ enum Priority {
 }
 
 enum Frequency {
+  DAILY
   WEEKLY
   BIWEEKLY
   MONTHLY
