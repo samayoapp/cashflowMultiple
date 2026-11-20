@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Check, Inbox, X } from 'lucide-react';
 import { useApp } from '@/components/AppContext';
-import { Badge, Button, Card, EmptyState, ErrorBox, Field, Loading, Modal, Tabs, useToast } from '@/components/ui';
+import { Badge, Button, Card, EmptyState, ErrorBox, Field, Loading, Modal, TableTotals, Tabs, useToast } from '@/components/ui';
 import { EntityDot } from '@/components/AppShell';
 import { centsInput, parseMoneyInput } from '@/components/forms';
 import { api, emitDataChanged, useApi } from '@/lib/client/api';
@@ -219,6 +219,19 @@ export default function InboxPage() {
                   );
                 })}
               </tbody>
+              <TableTotals
+                rows={data}
+                section={(s) => (s.direction === 'IN' ? 'Por cobrar' : s.direction === 'OUT' ? 'Por pagar' : 'Sin tipo')}
+                columns={[
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  (s) => (s.amount ? { amount: s.amount, currency: s.currency ?? app.entityById.get(s.entityId)?.currency ?? 'HNL' } : null),
+                  null,
+                ]}
+              />
             </table>
           </div>
         )}

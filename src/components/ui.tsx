@@ -3,7 +3,9 @@
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { Loader2, X } from 'lucide-react';
-import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { formatMoney } from '@/lib/money';
+import { tableTotals, type ColumnValue } from '@/lib/totals';
 import { createPortal } from 'react-dom';
 
 export function cn(...inputs: ClassValue[]) {
@@ -256,5 +258,66 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         ))}
       </div>
     </ToastCtx.Provider>
+  );
+}
+
+/**
+ * Pie de tabla con totales "como Excel": suma las filas que se están viendo (ya filtradas),
+ * con un total por moneda y, si se indica, por sección (p. ej. ingresos y gastos por separado).
+ * `columns` lleva una entrada por columna de la tabla: null = celda vacía; las primeras null
+ * forman la etiqueta "Total". `section` devuelve false para excluir una fila (p. ej. canceladas).
+ */
+export function TableTotals<T>({
+  rows,
+  columns,
+  section,
+  note,
+  noun = ['partida', 'partidas'],
+}: {
+  rows: readonly T[];
+  columns: readonly (ColumnValue<T> | null)[];
+  section?: (row: T) => string | null | false;
+  /** Aclaración junto al conteo, p. ej. "sin canceladas". */
+  note?: string;
+  noun?: [string, string];
+}) {
+  const sumIdx = useMemo(() => columns.flatMap((c, i) => (c ? [i] : [])), [columns]);
+  const totals = useMemo(
+    () => tableTotals(rows, sumIdx.map((i) => columns[i]!), section),
+    [rows, columns, sumIdx, section],
+  );
+  if (totals.length === 0 || sumIdx.length === 0) return null;
+  const labelSpan = Math.max(sumIdx[0], 1);
+  return (
+    <tfoot className="border-t-2 border-slate-300 bg-slate-50 dark:border-slate-700 dark:bg-slate-800/50">
+      {totals.map((t, k) => {
+        const firstOfSection = k === 0 || totals[k - 1].section !== t.section;
+        return (
+          <tr key={`${t.section}|${t.currency}`} className={cn(firstOfSection && k > 0 && 'border-t border-slate-200 dark:border-slate-700')}>
+            <td className="td font-semibold" colSpan={labelSpan}>
+              {firstOfSection && (
+                <>
+                  {t.section ?? 'Total'}
+                  <span className="ml-2 text-xs font-normal text-slate-500">
+                    {t.count} {t.count === 1 ? noun[0] : noun[1]}
+                    {note && k === 0 && ` · ${note}`}
+                  </span>
+                </>
+              )}
+            </td>
+            {columns.slice(labelSpan).map((c, j) => {
+              const i = labelSpan + j;
+              if (!c) return <td key={i} className="td" />;
+              const v = t.sums[sumIdx.indexOf(i)];
+              return (
+                <td key={i} className="td num font-semibold">
+                  {v === null ? '' : formatMoney(v, t.currency)}
+                </td>
+              );
+            })}
+          </tr>
+        );
+      })}
+    </tfoot>
   );
 }

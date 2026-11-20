@@ -3,7 +3,7 @@
 import { Fragment, useMemo, useState } from 'react';
 import { ArrowLeftRight, Ban, Building2, CalendarClock, CheckCircle2, ChevronDown, ChevronRight, Coins, CreditCard, Pencil, Plus, Repeat, Search, Send, SkipForward, Trash2, X } from 'lucide-react';
 import { useApp } from '@/components/AppContext';
-import { Badge, Button, Card, cn, EmptyState, ErrorBox, Loading, Tabs, Toggle, useToast } from '@/components/ui';
+import { Badge, Button, Card, cn, EmptyState, ErrorBox, Loading, TableTotals, Tabs, Toggle, useToast } from '@/components/ui';
 import { EntityDot } from '@/components/AppShell';
 import {
   ExecuteTransferModal,
@@ -144,6 +144,7 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
   const [charging, setCharging] = useState(false);
   const [loanPay, setLoanPay] = useState<{ id: string; partial: boolean } | null>(null);
   const [interEdit, setInterEdit] = useState<string | null>(null);
+  const curOf = (entityId: string) => app.entityById.get(entityId)?.currency ?? 'HNL';
 
   const rows = useMemo<Row[]>(() => {
     const obs: Row[] = (data ?? [])
@@ -605,6 +606,21 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
                 );
               })}
             </tbody>
+            <TableTotals
+              rows={rows}
+              note={rows.some((r) => r.kind === 'ob' && r.ob.status === 'CANCELLED') ? 'sin canceladas' : undefined}
+              section={(r) => (r.kind === 'ob' && r.ob.status === 'CANCELLED' ? false : null)}
+              columns={[
+                null,
+                null,
+                null,
+                (r) => (r.kind === 'up' ? { amount: r.up.amount, currency: curOf(r.up.entityId) } : { amount: r.ob.amount, currency: curOf(r.ob.entityId) }),
+                (r) => (r.kind === 'up' ? null : { amount: r.ob.paid, currency: curOf(r.ob.entityId) }),
+                (r) => (r.kind === 'up' ? { amount: r.up.amount, currency: curOf(r.up.entityId) } : { amount: r.ob.remaining, currency: curOf(r.ob.entityId) }),
+                null,
+                null,
+              ]}
+            />
           </table>
         </div>
       )}
@@ -720,6 +736,13 @@ function RulesTab() {
                 );
               })}
             </tbody>
+            <TableTotals
+              rows={data}
+              note={data.some((r) => !r.active) ? 'solo activas, por ocurrencia' : 'por ocurrencia'}
+              noun={['recurrencia', 'recurrencias']}
+              section={(r) => (!r.active ? false : r.direction === 'IN' ? 'Ingresos' : 'Gastos')}
+              columns={[null, null, null, null, null, (r) => ({ amount: r.amount, currency: app.entityById.get(r.entityId)?.currency ?? 'HNL' }), null, null]}
+            />
           </table>
         </div>
       )}
@@ -850,6 +873,13 @@ function TransfersTab() {
                   );
                 })}
               </tbody>
+              <TableTotals
+                rows={internalRows.data}
+                note={internalRows.data.some((t) => t.status === 'CANCELLED') ? 'sin anuladas' : undefined}
+                noun={['transferencia', 'transferencias']}
+                section={(t) => (t.status === 'CANCELLED' ? false : null)}
+                columns={[null, null, null, (t) => ({ amount: t.amount, currency: app.entityById.get(t.entityId)?.currency ?? 'HNL' }), null, null]}
+              />
             </table>
           </div>
         )}
@@ -962,6 +992,21 @@ function TransfersTab() {
                 );
               })}
             </tbody>
+            <TableTotals
+              rows={data}
+              note={data.some((t) => t.status === 'CANCELLED') ? 'sin canceladas' : undefined}
+              noun={['transferencia', 'transferencias']}
+              section={(t) => (t.status === 'CANCELLED' ? false : null)}
+              columns={[
+                null,
+                null,
+                null,
+                (t) => ({ amount: t.amountFrom, currency: app.entityById.get(t.fromEntityId)?.currency ?? 'HNL' }),
+                (t) => ({ amount: t.amountTo, currency: app.entityById.get(t.toEntityId)?.currency ?? 'HNL' }),
+                null,
+                null,
+              ]}
+            />
           </table>
         </div>
       )}
@@ -1235,6 +1280,17 @@ function CardsTab() {
                       );
                     })}
                   </tbody>
+                  <TableTotals
+                    rows={statements}
+                    noun={['estado de cuenta', 'estados de cuenta']}
+                    columns={[
+                      null,
+                      null,
+                      (s) => [{ amount: s.total.base, currency: cur }, ...(fc && s.total.foreign ? [{ amount: s.total.foreign, currency: fc }] : [])],
+                      (s) => [{ amount: s.pending.base, currency: cur }, ...(fc && s.pending.foreign ? [{ amount: s.pending.foreign, currency: fc }] : [])],
+                      null,
+                    ]}
+                  />
                 </table>
               </div>
             )}

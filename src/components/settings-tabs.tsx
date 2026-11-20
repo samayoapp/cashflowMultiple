@@ -17,7 +17,7 @@ import {
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { useApp } from '@/components/AppContext';
-import { Badge, Button, Card, cn, EmptyState, ErrorBox, Field, Loading, Modal, Tabs, Toggle, useToast } from '@/components/ui';
+import { Badge, Button, Card, cn, EmptyState, ErrorBox, Field, Loading, Modal, TableTotals, Tabs, Toggle, useToast } from '@/components/ui';
 import { EntityDot } from '@/components/AppShell';
 import { AccountFormModal, centsInput, EntityFormModal, parseMoneyInput } from '@/components/forms';
 import { api, emitDataChanged, useApi } from '@/lib/client/api';
@@ -153,6 +153,24 @@ export function AccountsTab() {
                 );
               })}
             </tbody>
+            <TableTotals
+              rows={data}
+              noun={['cuenta', 'cuentas']}
+              note={data.some((a) => a.archived) ? 'sin archivadas' : undefined}
+              section={(a) => (a.archived ? false : a.type === 'CREDIT_CARD' ? 'Deuda en tarjetas' : 'Caja real')}
+              columns={[
+                null,
+                null,
+                null,
+                (a) => {
+                  const c = app.entityById.get(a.entityId)?.currency ?? 'HNL';
+                  if (a.type !== 'CREDIT_CARD') return { amount: a.balance, currency: c };
+                  // Deuda en positivo, como se muestra en cada tarjeta
+                  return [{ amount: -a.balance, currency: c }, ...(a.foreignCurrency && a.balanceForeign ? [{ amount: -a.balanceForeign, currency: a.foreignCurrency }] : [])];
+                },
+                null,
+              ]}
+            />
           </table>
         </div>
       )}

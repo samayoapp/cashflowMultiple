@@ -4,7 +4,7 @@ import { useMemo, useState } from 'react';
 import { CalendarClock, CheckCircle2, Coins, Pencil } from 'lucide-react';
 import { useApp } from './AppContext';
 import { EntityDot } from './AppShell';
-import { Badge, Button, Card, cn, EmptyState, ErrorBox, Loading, Toggle, useToast } from './ui';
+import { Badge, Button, Card, cn, EmptyState, ErrorBox, Loading, TableTotals, Toggle, useToast } from './ui';
 import { ExecuteTransferModal, InterUnitEditModal, LoanRepaymentModal } from './forms';
 import { api, useApi } from '@/lib/client/api';
 import { formatMoney } from '@/lib/money';
@@ -182,6 +182,21 @@ export function InterUnitStatement() {
                       );
                     })}
                   </tbody>
+                  <TableTotals
+                    rows={p.items}
+                    note={p.items.some((i) => i.state === 'CANCELLED') ? 'sin canceladas' : undefined}
+                    section={(i) => (i.state === 'CANCELLED' ? false : `${name(i.debtorId)} → ${name(i.creditorId)}`)}
+                    columns={[
+                      null,
+                      null,
+                      null,
+                      (i) => ({ amount: i.original, currency: cur(i.creditorId) }),
+                      (i) => ({ amount: i.paid, currency: cur(i.creditorId) }),
+                      (i) => ({ amount: i.pending, currency: cur(i.creditorId) }),
+                      null,
+                      null,
+                    ]}
+                  />
                 </table>
               </div>
             </Card>
