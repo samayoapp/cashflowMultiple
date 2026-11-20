@@ -1356,7 +1356,7 @@ export function ExecuteTransferModal({
   open: boolean;
   onClose: () => void;
   transfer: { id: string } | null;
-  /** Abrir directamente en modo abono (solo devoluciones de préstamo). */
+  /** Abrir directamente en modo abono (devoluciones de préstamo y reembolsos). */
   partial?: boolean;
 }) {
   const app = useApp();
@@ -1372,8 +1372,11 @@ export function ExecuteTransferModal({
   const [amountTo, setAmountTo] = useState('');
   const [amountToTouched, setAmountToTouched] = useState(false);
 
-  const isRepayment = Boolean(t?.repaymentOfId);
+  const isReimbursement = Boolean(t?.isReimbursement);
+  // Devoluciones de préstamo y reembolsos se pagan por abonos
+  const isRepayment = Boolean(t?.repaymentOfId) || isReimbursement;
   const abono = isRepayment && partial;
+  const noun = isReimbursement ? 'reembolso' : 'devolución de préstamo';
   const from = t ? app.entityById.get(t.fromEntityId) : undefined;
   const to = t ? app.entityById.get(t.toEntityId) : undefined;
   const fromCur = from?.currency ?? 'HNL';
@@ -1425,12 +1428,12 @@ export function ExecuteTransferModal({
     }
     const ok = await run(
       () => api(`/api/transfers/${t.id}`, { body }),
-      abono ? 'Abono registrado' : isRepayment ? 'Préstamo saldado' : 'Transferencia ejecutada',
+      abono ? 'Abono registrado' : isRepayment ? (isReimbursement ? 'Reembolso saldado' : 'Préstamo saldado') : 'Transferencia ejecutada',
     );
     if (ok) onClose();
   }
 
-  const title = abono ? 'Abono a devolución de préstamo' : isRepayment ? 'Saldar devolución de préstamo' : 'Ejecutar transferencia';
+  const title = abono ? `Abono a ${noun}` : isRepayment ? `Saldar ${noun}` : 'Ejecutar transferencia';
   return (
     <Modal open={open} onClose={onClose} title={title}>
       <form onSubmit={submit} className="space-y-3">
@@ -1443,7 +1446,8 @@ export function ExecuteTransferModal({
             {isRepayment && (
               <div className="rounded-lg bg-slate-50 p-3 text-sm dark:bg-slate-800/40">
                 <p>
-                  {from?.name} le devuelve a {to?.name}
+                  {from?.name} le {isReimbursement ? 'reembolsa' : 'devuelve'} a {to?.name}
+                  {isReimbursement && t.description && <span className="text-slate-500"> · {t.description.replace(/^Reembolso: /, '')}</span>}
                 </p>
                 <p className="mt-1 text-slate-500">
                   Total {formatMoney(t.amountTo, toCur)}

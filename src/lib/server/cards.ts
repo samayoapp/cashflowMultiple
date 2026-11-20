@@ -459,6 +459,7 @@ export async function createReimbursedExpense(args: {
       description: label,
       userId: args.userId,
       outCategoryId: categoryId ?? null,
+      reimbursement: true,
     });
 
     // Opcional: el consumo en la tarjeta de la entidad dueña, SIN categoría (el gasto ya
@@ -477,7 +478,7 @@ export async function createReimbursedExpense(args: {
           createdById: args.userId,
         },
       });
-      await insertCardCharge(tx, {
+      const { charge } = await insertCardCharge(tx, {
         card,
         purchaseDate: args.purchaseDate,
         description: `${args.description} (reembolsable)`,
@@ -486,8 +487,64 @@ export async function createReimbursedExpense(args: {
         movementId: mv.id,
         userId: args.userId,
       });
+      await tx.cardCharge.update({ where: { id: charge.id }, data: { reimbursementTransferId: t.id } });
     }
     return { obligationId: null, transferId: t.id };
+  });
+}
+
+/**
+ * Convierte un consumo YA registrado en la tarjeta de una unidad (p. ej. la familia) en un gasto
+ * de otra unidad (el negocio) con su reembolso: crea la CxP en el negocio (con la categoría del gasto)
+ * y la CxC en la dueña de la tarjeta, y le quita la categoría al consumo para no contar el gasto dos veces.
+ * La deuda de la tarjeta no cambia: la sigue pagando su dueña.
+ */
+export async function convertChargeToReimbursement(args: {
+  chargeId: string;
+  /** Unidad a la que corresponde el gasto (la que reembolsa). */
+  entityId: string;
+  /** Lo que reembolsa, en la moneda de esa unidad. */
+  amountFrom: Cents;
+  /** Lo que recibe la dueña de la tarjeta, en su moneda. */
+  amountTo: Cents;
+  reimburseDate: ISODate;
+  categoryId?: string | null;
+  userId: string;
+}) {
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "CardCharge" WHERE id = ${args.chargeId} FOR UPDATE`;
+    const charge = await tx.cardCharge.findUnique({
+      where: { id: args.chargeId },
+      include: { reimbursementTransfer: { select: { status: true } } },
+    });
+    if (!charge) throw notFound('Consumo no encontrado');
+    if (charge.isOpening) throw badRequest('Un saldo inicial de tarjeta no se puede asignar a otra unidad; registra el consumo por separado');
+    if (charge.obligationId) throw badRequest('Este consumo viene del pago de una CxP con tarjeta; asigna esa CxP a la otra unidad en su lugar');
+    if (charge.reimbursementTransferId && charge.reimbursementTransfer?.status !== 'CANCELLED') {
+      throw conflict('Este consumo ya está asignado a otra unidad con su reembolso');
+    }
+    if (charge.entityId === args.entityId) throw badRequest('Elige una unidad distinta a la dueña de la tarjeta');
+    if (args.reimburseDate < isoOf(charge.purchaseDate)) throw badRequest('El reembolso no puede ser anterior a la compra');
+    const categoryId = await assertCategory(tx, args.entityId, args.categoryId);
+    const base = charge.description.replace(/ \(reembolsable\)$/, '');
+
+    const t = await createTransferTx(tx, {
+      kind: 'TRANSFER',
+      fromEntityId: args.entityId,
+      toEntityId: charge.entityId,
+      amountFrom: args.amountFrom,
+      amountTo: args.amountTo,
+      expectedDate: args.reimburseDate,
+      description: `Reembolso: ${base}`,
+      userId: args.userId,
+      outCategoryId: categoryId ?? null,
+      reimbursement: true,
+    });
+    await tx.cardCharge.update({
+      where: { id: charge.id },
+      data: { categoryId: null, reimbursementTransferId: t.id, description: `${base} (reembolsable)` },
+    });
+    return { transferId: t.id };
   });
 }
 
@@ -521,6 +578,8 @@ export async function getCardsSummary(entityIds: string[], today: ISODate) {
             openingKind: true,
             obligationId: true,
             exchangeRateAtTx: true,
+            amountBase: true,
+            reimbursementTransfer: { select: { id: true, status: true, fromEntityId: true } },
             category: { select: { name: true } },
             counterparty: { select: { name: true } },
           },
@@ -584,6 +643,13 @@ export async function getCardsSummary(entityIds: string[], today: ISODate) {
         isOpening: i.charge.isOpening,
         openingKind: openingKindOf(i.charge),
         fromObligation: Boolean(i.charge.obligationId),
+        /** Monto de la compra en la moneda de la unidad dueña de la tarjeta. */
+        chargeAmountBase: cents(i.charge.amountBase ?? i.charge.amount),
+        /** El gasto pertenece a otra unidad, que lo reembolsa (null si es propio). */
+        reimbursement:
+          i.charge.reimbursementTransfer && i.charge.reimbursementTransfer.status !== 'CANCELLED'
+            ? { transferId: i.charge.reimbursementTransfer.id, entityId: i.charge.reimbursementTransfer.fromEntityId, status: i.charge.reimbursementTransfer.status }
+            : null,
         number: i.number,
         count: i.count,
         amount,

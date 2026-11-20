@@ -557,3 +557,140 @@ export const cardStatusBadge: Record<string, { label: string; tone: 'slate' | 'g
   PAID: { label: 'Pagado', tone: 'green' },
   OVERDUE: { label: 'Vencido', tone: 'red' },
 };
+
+export interface AssignChargeTarget {
+  chargeId: string;
+  /** Unidad dueña de la tarjeta. */
+  cardEntityId: string;
+  description: string;
+  purchaseDate: string;
+  /** Monto de la compra en la moneda de la dueña de la tarjeta. */
+  amountBase: Cents;
+}
+
+/**
+ * "Este consumo es de otra unidad": el gasto pasa a la unidad elegida (con su categoría) y se crea
+ * el reembolso: CxP en esa unidad, CxC en la dueña de la tarjeta. La deuda de la tarjeta no cambia.
+ */
+export function AssignChargeModal({ open, onClose, target }: { open: boolean; onClose: () => void; target: AssignChargeTarget | null }) {
+  const app = useApp();
+  const { loading, error, run, setError } = useSubmit();
+  const options = useMemo(() => app.activeEntities.filter((e) => e.id !== target?.cardEntityId), [app.activeEntities, target?.cardEntityId]);
+  const [entityId, setEntityId] = useState('');
+  const [amountFrom, setAmountFrom] = useState('');
+  const [amountTo, setAmountTo] = useState('');
+  const [reimburseDate, setReimburseDate] = useState(app.today);
+  const [categoryId, setCategoryId] = useState('');
+  const catalog = useApi<{ categories: { id: string; name: string; direction: 'IN' | 'OUT' }[] }>(
+    open && entityId ? `/api/catalog?ctx=${entityId}` : null,
+  );
+  const outCategories = (catalog.data?.categories ?? []).filter((c) => c.direction === 'OUT');
+
+  useEffect(() => {
+    if (!open || !target) return;
+    setError(null);
+    setEntityId(options[0]?.id ?? '');
+    setAmountFrom(centsInput(target.amountBase));
+    setAmountTo(centsInput(target.amountBase));
+    setReimburseDate(app.today);
+    setCategoryId('');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, target?.chargeId]);
+  useEffect(() => setCategoryId(''), [entityId]);
+
+  if (!target) return null;
+  const owner = app.entityById.get(target.cardEntityId);
+  const ownerCur = owner?.currency ?? 'HNL';
+  const dest = app.entityById.get(entityId);
+  const destCur = dest?.currency ?? ownerCur;
+  const sameCurrency = destCur === ownerCur;
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!entityId) return setError('Elige la unidad a la que corresponde el gasto');
+    const a = parseMoneyInput(amountFrom);
+    if (a === null || Number(a) <= 0) return setError('Monto inválido');
+    const b = sameCurrency ? a : parseMoneyInput(amountTo);
+    if (b === null || Number(b) <= 0) return setError(`Indica el monto en ${ownerCur}`);
+    const ok = await run(
+      () =>
+        api(`/api/cards/charges/${target!.chargeId}/reimbursement`, {
+          body: { entityId, amountFrom: a, amountTo: b, reimburseDate, categoryId: categoryId || null },
+        }),
+      `Gasto asignado a ${dest?.name ?? 'la unidad'} con reembolso pendiente`,
+    );
+    if (ok) onClose();
+  }
+
+  return (
+    <Modal open={open} onClose={onClose} title="Este consumo es de otra unidad">
+      <form onSubmit={submit} className="space-y-3">
+        {error && <ErrorBox message={error} />}
+        <div className="rounded-lg bg-slate-50 p-3 text-sm dark:bg-slate-800/40">
+          <p className="font-medium">{target.description}</p>
+          <p className="text-slate-500">
+            {formatShortDate(target.purchaseDate)} · {formatMoney(target.amountBase, ownerCur)} en tarjeta de {owner?.name}
+          </p>
+        </div>
+        {options.length === 0 ? (
+          <ErrorBox message="Necesitas otra unidad de negocio activa." />
+        ) : (
+          <>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="¿De qué unidad es el gasto?">
+                <select className="input" value={entityId} onChange={(e) => setEntityId(e.target.value)} required>
+                  {options.map((e) => (
+                    <option key={e.id} value={e.id}>
+                      {e.name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Categoría del gasto">
+                <select className="input" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
+                  <option value="">Sin categoría</option>
+                  {outCategories.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label={`Monto a reembolsar (${destCur})`}>
+                <input className="input text-right" inputMode="decimal" value={amountFrom} onChange={(e) => setAmountFrom(e.target.value)} required />
+              </Field>
+              {!sameCurrency ? (
+                <Field label={`Recibe ${owner?.name} (${ownerCur})`}>
+                  <input className="input text-right" inputMode="decimal" value={amountTo} onChange={(e) => setAmountTo(e.target.value)} required />
+                </Field>
+              ) : (
+                <Field label="Fecha de reembolso">
+                  <input className="input" type="date" value={reimburseDate} onChange={(e) => setReimburseDate(e.target.value)} required />
+                </Field>
+              )}
+            </div>
+            {!sameCurrency && (
+              <Field label="Fecha de reembolso">
+                <input className="input" type="date" value={reimburseDate} onChange={(e) => setReimburseDate(e.target.value)} required />
+              </Field>
+            )}
+            <p className="text-xs text-slate-500">
+              Se crea una CxP en {dest?.name ?? 'esa unidad'} (con la categoría del gasto) y una CxC en {owner?.name}, pagaderas por abonos. El consumo
+              queda en la tarjeta (la deuda no cambia) pero sin categoría, para no contar el gasto dos veces.
+            </p>
+          </>
+        )}
+        <div className="flex justify-end gap-2 pt-1">
+          <Button type="button" onClick={onClose}>
+            Cancelar
+          </Button>
+          <Button type="submit" variant="primary" disabled={loading || options.length === 0}>
+            Asignar y crear reembolso
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}

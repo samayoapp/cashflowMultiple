@@ -1,7 +1,7 @@
 'use client';
 
 import { Fragment, useMemo, useState } from 'react';
-import { ArrowLeftRight, Ban, CalendarClock, CheckCircle2, ChevronDown, ChevronRight, Coins, CreditCard, Pencil, Plus, Repeat, Search, Send, SkipForward, Trash2, X } from 'lucide-react';
+import { ArrowLeftRight, Ban, Building2, CalendarClock, CheckCircle2, ChevronDown, ChevronRight, Coins, CreditCard, Pencil, Plus, Repeat, Search, Send, SkipForward, Trash2, X } from 'lucide-react';
 import { useApp } from '@/components/AppContext';
 import { Badge, Button, Card, cn, EmptyState, ErrorBox, Loading, Tabs, Toggle, useToast } from '@/components/ui';
 import { EntityDot } from '@/components/AppShell';
@@ -18,14 +18,15 @@ import {
   TransferFormModal,
 } from '@/components/forms';
 import { api, emitDataChanged, useApi } from '@/lib/client/api';
-import { CardChargeModal, CardPaymentModal, cardStatusBadge, type CardPaymentTarget } from '@/components/cards';
+import { InterUnitStatement } from '@/components/InterUnitStatement';
+import { AssignChargeModal, CardChargeModal, CardPaymentModal, cardStatusBadge, type AssignChargeTarget, type CardPaymentTarget } from '@/components/cards';
 import type { CardSummaryDto } from '@/lib/server/cards';
 import type { TransferDto } from '@/lib/server/dto';
 import { formatMoney } from '@/lib/money';
 import { addDays, addMonths, endOfMonth, formatDateYear, formatShortDate } from '@/lib/dates';
 import type { ObligationDto, RuleDto, UpcomingOccurrenceDto } from '@/lib/server/dto';
 
-type Tab = 'IN' | 'OUT' | 'cards' | 'rules' | 'transfers';
+type Tab = 'IN' | 'OUT' | 'cards' | 'rules' | 'transfers' | 'interunit';
 
 export default function OperationsPage() {
   const [tab, setTab] = useState<Tab>('IN');
@@ -43,6 +44,7 @@ export default function OperationsPage() {
             { id: 'cards', label: 'Tarjetas' },
             { id: 'rules', label: 'Plantillas recurrentes' },
             { id: 'transfers', label: 'Transferencias' },
+            { id: 'interunit', label: 'Entre unidades' },
           ]}
           value={tab}
           onChange={setTab}
@@ -52,6 +54,7 @@ export default function OperationsPage() {
       {tab === 'cards' && <CardsTab />}
       {tab === 'rules' && <RulesTab />}
       {tab === 'transfers' && <TransfersTab />}
+      {tab === 'interunit' && <InterUnitStatement />}
     </div>
   );
 }
@@ -253,11 +256,11 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
   }
 
   async function cancelLoan(o: ObligationDto) {
-    if (!o.loanRepayment) return;
+    if (!o.interUnit) return;
     if (!confirm(`¿Cancelar el saldo pendiente de "${o.description}"? Se cancela en ambas unidades; los abonos ya hechos se conservan.`)) return;
     try {
-      await api(`/api/transfers/${o.loanRepayment.transferId}`, { body: { action: 'cancel' } });
-      toast('Saldo del préstamo cancelado');
+      await api(`/api/transfers/${o.interUnit.transferId}`, { body: { action: 'cancel' } });
+      toast(o.interUnit?.kind === 'REIMBURSEMENT' ? 'Saldo del reembolso cancelado' : 'Saldo del préstamo cancelado');
       emitDataChanged();
     } catch (e) {
       toast(e instanceof Error ? e.message : 'Error', 'error');
@@ -502,7 +505,9 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
                         {o.counterparty?.name ?? 'Sin contraparte'}
                         {o.isHypothetical && <Badge tone="violet">Hipotética</Badge>}
                         {o.recurrenceId && <Badge tone="blue">Recurrente</Badge>}
-                        {o.loanRepayment && <Badge tone="violet">Préstamo entre unidades</Badge>}
+                        {o.interUnit && (
+                          <Badge tone="violet">{o.interUnit.kind === 'LOAN' ? 'Préstamo entre unidades' : 'Reembolso entre unidades'}</Badge>
+                        )}
                         {!isIn && <Badge tone={o.priority === 'FIXED' ? 'amber' : 'slate'}>{o.priority === 'FIXED' ? 'Inamovible' : 'Flexible'}</Badge>}
                       </div>
                     </td>
@@ -527,14 +532,14 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
                       <Badge tone={st.tone}>{st.label}</Badge>
                     </td>
                     <td className="td">
-                      {o.loanRepayment ? (
+                      {o.interUnit ? (
                         <div className="flex justify-end gap-0.5">
                           {!closed && (
                             <>
-                              <Button size="sm" variant="ghost" title="Saldar todo lo pendiente" onClick={() => setLoanPay({ id: o.loanRepayment!.transferId, partial: false })}>
+                              <Button size="sm" variant="ghost" title="Saldar todo lo pendiente" onClick={() => setLoanPay({ id: o.interUnit!.transferId, partial: false })}>
                                 <CheckCircle2 className="h-4 w-4 text-emerald-600" />
                               </Button>
-                              <Button size="sm" variant="ghost" title="Registrar abono" onClick={() => setLoanPay({ id: o.loanRepayment!.transferId, partial: true })}>
+                              <Button size="sm" variant="ghost" title="Registrar abono" onClick={() => setLoanPay({ id: o.interUnit!.transferId, partial: true })}>
                                 <Coins className="h-4 w-4" />
                               </Button>
                               <Button size="sm" variant="ghost" title="Reprogramar (ambas unidades)" onClick={() => setMove(o)}>
@@ -743,8 +748,8 @@ function TransfersTab() {
   const [programming, setProgramming] = useState<TransferRow | null>(null);
 
   async function cancel(t: TransferRow) {
-    const msg = t.repaymentOfId
-      ? '¿Cancelar el saldo pendiente de esta devolución? Los abonos ya hechos se conservan.'
+    const msg = t.repaymentOfId || t.isReimbursement
+      ? `¿Cancelar el saldo pendiente de ${t.isReimbursement ? 'este reembolso' : 'esta devolución'}? Los abonos ya hechos se conservan.`
       : t.kind === 'LOAN' && t.repayment
         ? '¿Cancelar este préstamo? Su devolución programada también se cancela.'
         : '¿Cancelar esta transferencia planificada?';
@@ -883,7 +888,7 @@ function TransfersTab() {
                 return (
                   <tr key={t.id} className="border-t border-slate-100 dark:border-slate-800">
                     <td className="td">
-                      <div className="font-medium">{t.repaymentOfId ? 'Devolución de préstamo' : KIND[t.kind]}</div>
+                      <div className="font-medium">{t.repaymentOfId ? 'Devolución de préstamo' : t.isReimbursement ? 'Reembolso' : KIND[t.kind]}</div>
                       <div className="text-xs text-slate-500">{t.description}</div>
                       {t.interest > 0 && <div className="text-xs text-slate-500">Incluye interés {formatMoney(t.interest, to?.currency ?? 'HNL')}</div>}
                     </td>
@@ -896,7 +901,7 @@ function TransfersTab() {
                     <td className="td num">{formatMoney(t.amountFrom, from?.currency ?? 'HNL')}</td>
                     <td className="td num">
                       {formatMoney(t.amountTo, to?.currency ?? 'HNL')}
-                      {t.repaymentOfId && t.paidTo > 0 && (
+                      {(t.repaymentOfId || t.isReimbursement) && t.paidTo > 0 && (
                         <div className="text-[11px] font-normal text-slate-500">
                           Abonado {formatMoney(t.paidTo, to?.currency ?? 'HNL')} · resta {formatMoney(t.remainingTo, to?.currency ?? 'HNL')}
                         </div>
@@ -905,7 +910,7 @@ function TransfersTab() {
                     <td className="td">
                       <Badge tone={t.status === 'EXECUTED' ? 'green' : t.status === 'CANCELLED' ? 'red' : t.paidTo > 0 ? 'amber' : 'slate'}>
                         {t.status === 'EXECUTED'
-                          ? t.repaymentOfId
+                          ? t.repaymentOfId || t.isReimbursement
                             ? 'Saldada'
                             : 'Ejecutada'
                           : t.status === 'CANCELLED'
@@ -920,7 +925,7 @@ function TransfersTab() {
                     </td>
                     <td className="td">
                       <div className="flex justify-end gap-1">
-                        {t.status === 'PLANNED' && t.repaymentOfId && (
+                        {t.status === 'PLANNED' && (t.repaymentOfId || t.isReimbursement) && (
                           <>
                             <Button size="sm" onClick={() => setExecuting({ id: t.id, partial: true })}>
                               <Coins className="h-3.5 w-3.5" /> Abonar
@@ -930,7 +935,7 @@ function TransfersTab() {
                             </Button>
                           </>
                         )}
-                        {t.status === 'PLANNED' && !t.repaymentOfId && (
+                        {t.status === 'PLANNED' && !t.repaymentOfId && !t.isReimbursement && (
                           <Button size="sm" onClick={() => setExecuting({ id: t.id, partial: false })}>
                             <Send className="h-3.5 w-3.5" /> Ejecutar
                           </Button>
@@ -941,7 +946,7 @@ function TransfersTab() {
                           </Button>
                         )}
                         {t.status === 'PLANNED' && (
-                          <Button size="sm" variant="ghost" onClick={() => cancel(t)} title={t.repaymentOfId ? 'Cancelar saldo pendiente' : 'Cancelar'}>
+                          <Button size="sm" variant="ghost" onClick={() => cancel(t)} title={t.repaymentOfId || t.isReimbursement ? 'Cancelar saldo pendiente' : 'Cancelar'}>
                             <Ban className="h-4 w-4 text-rose-500" />
                           </Button>
                         )}
@@ -966,6 +971,9 @@ function TransfersTab() {
 // ---------------------------------------------------------------- Tarjetas de crédito
 interface StatementItem {
   installmentId: string;
+  chargeId: string;
+  chargeAmountBase: number;
+  reimbursement: { transferId: string; entityId: string; status: string } | null;
   currency: string;
   rateAtTx: string | null;
   description: string;
@@ -987,6 +995,7 @@ function CardsTab() {
   const { data, error, loading } = useApi<CardSummaryDto[]>(`/api/cards?ctx=${encodeURIComponent(app.ctx)}`);
   const [charge, setCharge] = useState<{ cardId: string; entityId: string } | null>(null);
   const [pay, setPay] = useState<CardPaymentTarget | null>(null);
+  const [assign, setAssign] = useState<AssignChargeTarget | null>(null);
   const [showPaid, setShowPaid] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const toggle = (k: string) =>
@@ -1177,6 +1186,12 @@ function CardsTab() {
                                     {i.openingKind === 'STATEMENT' && <Badge>Saldo inicial al corte</Badge>}
                                     {i.openingKind === 'UNBILLED' && <Badge>Consumos iniciales desde el corte</Badge>}
                                     {i.fromObligation && <Badge>Desde CxP</Badge>}
+                                    {i.reimbursement && (
+                                      <Badge tone="violet">
+                                        Gasto de {app.entityById.get(i.reimbursement.entityId)?.name ?? 'otra unidad'} ·{' '}
+                                        {i.reimbursement.status === 'EXECUTED' ? 'reembolsado' : 'por reembolsar'}
+                                      </Badge>
+                                    )}
                                   </div>
                                   <div className="text-xs text-slate-500">
                                     {formatShortDate(i.purchaseDate)}
@@ -1188,7 +1203,26 @@ function CardsTab() {
                                 </td>
                                 <td className="td num text-slate-500">{formatMoney(i.amount, i.currency)}</td>
                                 <td className="td num">{i.pending ? formatMoney(i.pending, i.currency) : '—'}</td>
-                                <td className="td" />
+                                <td className="td text-right">
+                                  {!i.reimbursement && !i.isOpening && !i.fromObligation && i.number === 1 && app.activeEntities.length > 1 && (
+                                    <Button
+                                      size="sm"
+                                      variant="ghost"
+                                      title="Este consumo es de otra unidad: asignar el gasto y crear su reembolso"
+                                      onClick={() =>
+                                        setAssign({
+                                          chargeId: i.chargeId,
+                                          cardEntityId: c.entityId,
+                                          description: i.description,
+                                          purchaseDate: i.purchaseDate,
+                                          amountBase: i.chargeAmountBase,
+                                        })
+                                      }
+                                    >
+                                      <Building2 className="h-4 w-4 text-violet-600" />
+                                    </Button>
+                                  )}
+                                </td>
                               </tr>
                             ))}
                         </Fragment>
@@ -1215,6 +1249,7 @@ function CardsTab() {
       })}
       <CardChargeModal open={Boolean(charge)} onClose={() => setCharge(null)} entityId={charge?.entityId} cardId={charge?.cardId} />
       <CardPaymentModal open={Boolean(pay)} onClose={() => setPay(null)} target={pay} />
+      <AssignChargeModal open={Boolean(assign)} onClose={() => setAssign(null)} target={assign} />
     </div>
   );
 }

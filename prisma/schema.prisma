@@ -329,31 +329,34 @@ model RecurringRule {
 }
 
 model InterEntityTransfer {
-  id             String               @id @default(uuid())
-  kind           TransferKind         @default(TRANSFER)
-  status         TransferStatus       @default(PLANNED)
-  fromEntityId   String
-  toEntityId     String
-  fromAccountId  String?
-  toAccountId    String?
-  amountFrom     Decimal              @db.Decimal(18, 2)
-  amountTo       Decimal              @db.Decimal(18, 2)
-  expectedDate   DateTime             @db.Date
-  executedDate   DateTime?            @db.Date
-  description    String?
+  id               String               @id @default(uuid())
+  kind             TransferKind         @default(TRANSFER)
+  status           TransferStatus       @default(PLANNED)
+  fromEntityId     String
+  toEntityId       String
+  fromAccountId    String?
+  toAccountId      String?
+  amountFrom       Decimal              @db.Decimal(18, 2)
+  amountTo         Decimal              @db.Decimal(18, 2)
+  expectedDate     DateTime             @db.Date
+  executedDate     DateTime?            @db.Date
+  description      String?
   /// Esta transferencia es la DEVOLUCIÓN (por abonos) del préstamo indicado
-  repaymentOfId  String?              @unique
+  repaymentOfId    String?              @unique
   /// Interés incluido en la devolución, en la moneda de quien prestó (0 = sin interés)
-  interestAmount Decimal              @default(0) @db.Decimal(18, 2)
-  createdById    String?
-  createdAt      DateTime             @default(now())
-  updatedAt      DateTime             @updatedAt
-  fromEntity     Entity               @relation("TransferFrom", fields: [fromEntityId], references: [id], onDelete: Restrict)
-  toEntity       Entity               @relation("TransferTo", fields: [toEntityId], references: [id], onDelete: Restrict)
-  repaymentOf    InterEntityTransfer? @relation("LoanRepayment", fields: [repaymentOfId], references: [id], onDelete: SetNull)
-  repayment      InterEntityTransfer? @relation("LoanRepayment")
-  obligations    Obligation[]
-  movements      CashMovement[]
+  interestAmount   Decimal              @default(0) @db.Decimal(18, 2)
+  /// Reembolso de un gasto de la unidad origen pagado con tarjeta de la unidad destino (se paga por abonos)
+  isReimbursement  Boolean              @default(false)
+  createdById      String?
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+  fromEntity       Entity               @relation("TransferFrom", fields: [fromEntityId], references: [id], onDelete: Restrict)
+  toEntity         Entity               @relation("TransferTo", fields: [toEntityId], references: [id], onDelete: Restrict)
+  repaymentOf      InterEntityTransfer? @relation("LoanRepayment", fields: [repaymentOfId], references: [id], onDelete: SetNull)
+  repayment        InterEntityTransfer? @relation("LoanRepayment")
+  reimbursedCharge CardCharge?          @relation("ChargeReimbursement")
+  obligations      Obligation[]
+  movements        CashMovement[]
 
   @@index([fromEntityId])
   @@index([toEntityId])
@@ -431,31 +434,34 @@ model StagingItem {
 // ---- Tarjetas de crédito (cuenta puente) ----
 
 model CardCharge {
-  id               String            @id @default(uuid())
-  entityId         String
-  cardAccountId    String
-  purchaseDate     DateTime          @db.Date
-  description      String
-  amount           Decimal           @db.Decimal(18, 2)
-  installments     Int               @default(1)
-  categoryId       String?
-  counterpartyId   String?
-  obligationId     String?           @unique
-  movementId       String            @unique
-  isOpening        Boolean           @default(false)
-  openingKind      String? // NULL/STATEMENT = saldo al corte; UNBILLED = consumos después del corte
-  currency         String? // NULL = moneda de la entidad
-  exchangeRateAtTx Decimal?          @db.Decimal(10, 4)
-  amountBase       Decimal?          @db.Decimal(18, 2)
-  createdById      String?
-  createdAt        DateTime          @default(now())
-  entity           Entity            @relation(fields: [entityId], references: [id], onDelete: Restrict)
-  card             Account           @relation(fields: [cardAccountId], references: [id], onDelete: Restrict)
-  category         Category?         @relation(fields: [categoryId], references: [id], onDelete: SetNull)
-  counterparty     Counterparty?     @relation(fields: [counterpartyId], references: [id], onDelete: SetNull)
-  obligation       Obligation?       @relation(fields: [obligationId], references: [id], onDelete: SetNull)
-  movement         CashMovement      @relation(fields: [movementId], references: [id], onDelete: Restrict)
-  installmentRows  CardInstallment[]
+  id                      String               @id @default(uuid())
+  entityId                String
+  cardAccountId           String
+  purchaseDate            DateTime             @db.Date
+  description             String
+  amount                  Decimal              @db.Decimal(18, 2)
+  installments            Int                  @default(1)
+  categoryId              String?
+  counterpartyId          String?
+  obligationId            String?              @unique
+  movementId              String               @unique
+  isOpening               Boolean              @default(false)
+  openingKind             String? // NULL/STATEMENT = saldo al corte; UNBILLED = consumos después del corte
+  currency                String? // NULL = moneda de la entidad
+  exchangeRateAtTx        Decimal?             @db.Decimal(10, 4)
+  amountBase              Decimal?             @db.Decimal(18, 2)
+  createdById             String?
+  createdAt               DateTime             @default(now())
+  entity                  Entity               @relation(fields: [entityId], references: [id], onDelete: Restrict)
+  card                    Account              @relation(fields: [cardAccountId], references: [id], onDelete: Restrict)
+  category                Category?            @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  counterparty            Counterparty?        @relation(fields: [counterpartyId], references: [id], onDelete: SetNull)
+  obligation              Obligation?          @relation(fields: [obligationId], references: [id], onDelete: SetNull)
+  movement                CashMovement         @relation(fields: [movementId], references: [id], onDelete: Restrict)
+  /// El consumo corresponde a este reembolso: el gasto se clasifica en la unidad que reembolsa
+  reimbursementTransferId String?              @unique
+  reimbursementTransfer   InterEntityTransfer? @relation("ChargeReimbursement", fields: [reimbursementTransferId], references: [id], onDelete: SetNull)
+  installmentRows         CardInstallment[]
 
   @@index([entityId])
   @@index([cardAccountId, purchaseDate])

@@ -48,8 +48,8 @@ export const GET = route(async (req) => {
       : transfers === 'only'
         ? { transferId: { not: null } }
         : transfers === 'loans'
-          ? // Partidas normales + devoluciones de préstamos entre unidades (se cobran/pagan por abonos)
-            { OR: [{ transferId: null }, { transfer: { repaymentOfId: { not: null } } }] }
+          ? // Partidas normales + devoluciones de préstamos y reembolsos entre unidades (se cobran/pagan por abonos)
+            { OR: [{ transferId: null }, { transfer: { repaymentOfId: { not: null } } }, { transfer: { isReimbursement: true } }] }
           : {}),
     ...(q
       ? {

@@ -178,6 +178,8 @@ interface TransferArgs {
   outCategoryId?: string | null;
   /** Solo préstamos: programa su devolución (CxC en quien presta, CxP en quien recibe). */
   repayment?: { dueDate: ISODate; interest: Cents } | null;
+  /** Reembolso de un gasto pagado con tarjeta de la unidad destino (se paga por abonos). */
+  reimbursement?: boolean;
 }
 
 /**
@@ -210,6 +212,7 @@ export async function createTransferTx(tx: Tx, args: TransferArgs) {
       amountTo: dec(args.amountTo),
       expectedDate: dbDate(args.expectedDate),
       description: args.description,
+      isReimbursement: Boolean(args.reimbursement),
       createdById: args.userId,
     },
   });
@@ -350,7 +353,9 @@ export async function payTransfer(args: {
       throw conflict('El préstamo todavía no se ha entregado: ejecútalo primero');
     }
     const partial = args.amountFrom !== undefined;
-    if (partial && !t.repaymentOfId) throw badRequest('Solo las devoluciones de préstamo aceptan abonos');
+    if (partial && !t.repaymentOfId && !t.isReimbursement) {
+      throw badRequest('Solo las devoluciones de préstamo y los reembolsos aceptan abonos');
+    }
 
     const [fromAcc, toAcc] = await Promise.all([
       tx.account.findUnique({ where: { id: args.fromAccountId } }),

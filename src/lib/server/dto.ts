@@ -47,7 +47,7 @@ export const obligationInclude = {
   payments: { orderBy: { date: 'asc' as const }, include: { account: { select: { name: true, type: true } } } },
   counterparty: { select: { id: true, name: true } },
   category: { select: { id: true, name: true } },
-  transfer: { select: { id: true, fromEntityId: true, toEntityId: true, repaymentOfId: true, status: true } },
+  transfer: { select: { id: true, fromEntityId: true, toEntityId: true, repaymentOfId: true, isReimbursement: true, status: true } },
 } satisfies Prisma.ObligationInclude;
 
 type ObligationWith = Prisma.ObligationGetPayload<{ include: typeof obligationInclude }>;
@@ -73,10 +73,16 @@ export function obligationDto(o: ObligationWith) {
     recurrenceId: o.recurrenceId,
     occurrenceDate: isoOrNull(o.occurrenceDate),
     transferId: o.transferId,
-    /** Devolución de préstamo entre unidades (se opera con abonos de transferencia). */
-    loanRepayment: o.transfer?.repaymentOfId
-      ? { transferId: o.transfer.id, fromEntityId: o.transfer.fromEntityId, toEntityId: o.transfer.toEntityId }
-      : null,
+    /** Devolución de préstamo o reembolso entre unidades (se opera con abonos de transferencia). */
+    interUnit:
+      o.transfer && (o.transfer.repaymentOfId || o.transfer.isReimbursement)
+        ? {
+            transferId: o.transfer.id,
+            kind: o.transfer.repaymentOfId ? ('LOAN' as const) : ('REIMBURSEMENT' as const),
+            fromEntityId: o.transfer.fromEntityId,
+            toEntityId: o.transfer.toEntityId,
+          }
+        : null,
     notes: o.notes,
     payments: o.payments.map((p) => ({
       id: p.id,
@@ -160,6 +166,8 @@ export function transferDto(t: TransferWith) {
     description: t.description,
     /** Es la devolución del préstamo indicado. */
     repaymentOfId: t.repaymentOfId,
+    /** Reembolso de un gasto pagado con tarjeta de la unidad destino. */
+    isReimbursement: t.isReimbursement,
     interest: cents(t.interestAmount),
     /** Préstamo: su devolución (si ya se programó). */
     repayment: t.repayment,
