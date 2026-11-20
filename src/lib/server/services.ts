@@ -7,7 +7,8 @@ import type { ISODate } from '@/lib/dates';
 import { centsToDecimalString, type Cents } from '@/lib/money';
 import { insertCardCharge } from './cards';
 import { assertOnOrAfterOpening } from './account-opening';
-import { repaymentTotals, splitTransferPayment } from '@/lib/projection/loans';
+import { editTransferAmounts, repaymentTotals, splitTransferPayment } from '@/lib/projection/loans';
+import { assertCategory } from './catalog';
 
 type Tx = Prisma.TransactionClient;
 
@@ -418,6 +419,142 @@ export async function payTransfer(args: {
         ? { status: 'EXECUTED', executedDate: date, fromAccountId: fromAcc.id, toAccountId: toAcc.id }
         : { fromAccountId: fromAcc.id, toAccountId: toAcc.id },
     });
+  });
+}
+
+/** Partidas espejo de una transferencia con sus abonos (para editar o eliminar). */
+async function loadInterUnitForEdit(tx: Tx, transferId: string) {
+  await tx.$queryRaw`SELECT id FROM "InterEntityTransfer" WHERE id = ${transferId} FOR UPDATE`;
+  const t = await tx.interEntityTransfer.findUnique({
+    where: { id: transferId },
+    include: {
+      fromEntity: true,
+      toEntity: true,
+      reimbursedCharge: { select: { id: true } },
+      obligations: { include: { payments: { select: { amount: true } } } },
+    },
+  });
+  if (!t) throw notFound('Transferencia no encontrada');
+  if (!t.isReimbursement && !t.repaymentOfId) {
+    throw badRequest('Solo se editan reembolsos y devoluciones de préstamo entre unidades');
+  }
+  const out = t.obligations.find((o) => o.direction === 'OUT');
+  const inn = t.obligations.find((o) => o.direction === 'IN');
+  if (!out || !inn) throw conflict('La transferencia no tiene sus dos partidas');
+  const paidOf = (o: typeof out) => o.payments.reduce((s, p) => s + cents(p.amount), 0);
+  return { t, out, inn, paidFrom: paidOf(out), paidTo: paidOf(inn) };
+}
+
+/**
+ * Edita un reembolso o una devolución de préstamo entre unidades: cambia SIEMPRE las dos partidas
+ * espejo juntas (CxP en el origen y CxC en el destino). No mueve caja.
+ * Monto y categoría solo aplican a reembolsos (la devolución de un préstamo la define el préstamo).
+ */
+export async function updateInterUnitTransfer(args: {
+  transferId: string;
+  /** Detalle (en reembolsos, sin el prefijo "Reembolso: "). */
+  description?: string;
+  notes?: string | null;
+  categoryId?: string | null;
+  amountFrom?: Cents;
+  amountTo?: Cents;
+  date?: ISODate;
+}) {
+  return prisma.$transaction(async (tx) => {
+    const { t, out, inn, paidFrom, paidTo } = await loadInterUnitForEdit(tx, args.transferId);
+    if (t.status !== 'PLANNED') throw conflict('Solo se edita lo que está pendiente (no saldado ni cancelado)');
+    const isReimb = t.isReimbursement;
+
+    const transferData: Prisma.InterEntityTransferUpdateInput = {};
+    const outData: Prisma.ObligationUpdateInput = {};
+    const inData: Prisma.ObligationUpdateInput = {};
+
+    if (args.description !== undefined) {
+      const detail = args.description.trim().replace(/^Reembolso:\s*/i, '');
+      if (!detail) throw badRequest('La descripción no puede quedar vacía');
+      const label = isReimb ? `Reembolso: ${detail}` : detail;
+      transferData.description = label;
+      outData.description = `${label} → ${t.toEntity.name}`;
+      inData.description = `${label} ← ${t.fromEntity.name}`;
+    }
+    if (args.notes !== undefined) {
+      const notes = args.notes?.trim() || null;
+      outData.notes = notes;
+      inData.notes = notes;
+    }
+    if (args.categoryId !== undefined) {
+      if (!isReimb) throw badRequest('Las devoluciones de préstamo no llevan categoría');
+      const categoryId = await assertCategory(tx, t.fromEntityId, args.categoryId);
+      outData.category = categoryId ? { connect: { id: categoryId } } : { disconnect: true };
+    }
+    if (args.amountFrom !== undefined) {
+      const oldFrom = cents(t.amountFrom);
+      const oldTo = cents(t.amountTo);
+      const changes = args.amountFrom !== oldFrom || (args.amountTo !== undefined && args.amountTo !== oldTo);
+      if (changes) {
+        if (!isReimb) throw badRequest('El monto de una devolución lo define el préstamo y su interés');
+        if (t.reimbursedCharge) {
+          throw conflict('Este reembolso está ligado a un consumo de tarjeta: su monto lo define ese consumo');
+        }
+        let amounts: { from: Cents; to: Cents };
+        try {
+          amounts = editTransferAmounts({
+            oldFrom,
+            oldTo,
+            paidFrom,
+            paidTo,
+            newFrom: args.amountFrom,
+            newTo: args.amountTo,
+            sameCurrency: t.fromEntity.currency === t.toEntity.currency,
+          });
+        } catch (e) {
+          throw badRequest(e instanceof Error ? e.message : 'Monto inválido');
+        }
+        transferData.amountFrom = dec(amounts.from);
+        transferData.amountTo = dec(amounts.to);
+        outData.amount = dec(amounts.from);
+        inData.amount = dec(amounts.to);
+        outData.status = paidFrom > 0 ? 'PARTIAL' : 'OPEN';
+        inData.status = paidTo > 0 ? 'PARTIAL' : 'OPEN';
+      }
+    }
+    if (args.date !== undefined) {
+      if (t.repaymentOfId) {
+        const loan = await tx.interEntityTransfer.findUnique({ where: { id: t.repaymentOfId } });
+        const lentOn = loan ? isoOf(loan.executedDate ?? loan.expectedDate) : null;
+        if (lentOn && args.date < lentOn) throw badRequest(`La devolución no puede ser antes del préstamo (${lentOn})`);
+      }
+      const d = dbDate(args.date);
+      transferData.expectedDate = d;
+      for (const data of [outData, inData]) {
+        data.dueDate = d;
+        data.expectedDate = d;
+      }
+    }
+
+    await tx.interEntityTransfer.update({ where: { id: t.id }, data: transferData });
+    await tx.obligation.update({ where: { id: out.id }, data: outData });
+    await tx.obligation.update({ where: { id: inn.id }, data: inData });
+    return { id: t.id };
+  });
+}
+
+/**
+ * Elimina por completo un reembolso o una devolución de préstamo entre unidades (p. ej. registrado
+ * por error), con sus dos partidas. Solo si no tiene abonos en ningún lado; si los tiene, se cancela
+ * el saldo pendiente. Una devolución eliminada deja el préstamo "sin devolución programada".
+ */
+export async function deleteInterUnitTransfer(transferId: string) {
+  return prisma.$transaction(async (tx) => {
+    const { t, paidFrom, paidTo } = await loadInterUnitForEdit(tx, transferId);
+    if (paidFrom > 0 || paidTo > 0 || t.status === 'EXECUTED') {
+      throw conflict('Tiene abonos registrados: no se puede eliminar; cancela el saldo pendiente en su lugar');
+    }
+    if (t.reimbursedCharge) {
+      throw conflict('Está ligado a un consumo de tarjeta: cancélalo en su lugar (el consumo podrá asignarse de nuevo)');
+    }
+    // Las partidas espejo se borran en cascada
+    await tx.interEntityTransfer.delete({ where: { id: t.id } });
   });
 }
 

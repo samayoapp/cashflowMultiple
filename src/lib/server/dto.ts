@@ -138,8 +138,9 @@ export interface UpcomingOccurrenceDto {
 }
 
 export const transferInclude = {
-  obligations: { select: { direction: true, amount: true, payments: { select: { amount: true } } } },
+  obligations: { select: { direction: true, amount: true, categoryId: true, notes: true, payments: { select: { amount: true } } } },
   repayment: { select: { id: true, status: true } },
+  reimbursedCharge: { select: { id: true } },
 } satisfies Prisma.InterEntityTransferInclude;
 
 type TransferWith = Prisma.InterEntityTransferGetPayload<{ include: typeof transferInclude }>;
@@ -175,6 +176,11 @@ export function transferDto(t: TransferWith) {
     remainingFrom: out.remaining,
     paidTo: inn.paid,
     remainingTo: inn.remaining,
+    /** Categoría del gasto en la unidad origen (reembolsos). */
+    categoryId: t.obligations.find((x) => x.direction === 'OUT')?.categoryId ?? null,
+    notes: t.obligations.find((x) => x.direction === 'OUT')?.notes ?? null,
+    /** Reembolso ligado a un consumo de tarjeta: su monto lo define el consumo. */
+    chargeLinked: Boolean(t.reimbursedCharge),
   };
 }
 export type TransferDto = ReturnType<typeof transferDto>;

@@ -1,11 +1,11 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { CalendarClock, CheckCircle2, Coins } from 'lucide-react';
+import { CalendarClock, CheckCircle2, Coins, Pencil } from 'lucide-react';
 import { useApp } from './AppContext';
 import { EntityDot } from './AppShell';
 import { Badge, Button, Card, cn, EmptyState, ErrorBox, Loading, Toggle, useToast } from './ui';
-import { ExecuteTransferModal, LoanRepaymentModal } from './forms';
+import { ExecuteTransferModal, InterUnitEditModal, LoanRepaymentModal } from './forms';
 import { api, useApi } from '@/lib/client/api';
 import { formatMoney } from '@/lib/money';
 import { formatDateYear } from '@/lib/dates';
@@ -36,6 +36,7 @@ export function InterUnitStatement() {
   const [onlyPending, setOnlyPending] = useState(true);
   const [paying, setPaying] = useState<{ id: string; partial: boolean } | null>(null);
   const [programming, setProgramming] = useState<TransferDto | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
 
   const pairs = useMemo(
     () =>
@@ -165,6 +166,9 @@ export function InterUnitStatement() {
                                   <Button size="sm" variant="ghost" title="Saldar todo lo pendiente" onClick={() => setPaying({ id: i.transferId, partial: false })}>
                                     <CheckCircle2 className="h-4 w-4 text-emerald-600" />
                                   </Button>
+                                  <Button size="sm" variant="ghost" title="Editar (ambas unidades)" onClick={() => setEditing(i.transferId)}>
+                                    <Pencil className="h-4 w-4" />
+                                  </Button>
                                 </>
                               )}
                               {i.state === 'NO_PLAN' && (
@@ -186,6 +190,7 @@ export function InterUnitStatement() {
       )}
       <ExecuteTransferModal open={Boolean(paying)} onClose={() => setPaying(null)} transfer={paying} partial={paying?.partial} />
       <LoanRepaymentModal open={Boolean(programming)} onClose={() => setProgramming(null)} loan={programming} />
+      <InterUnitEditModal open={Boolean(editing)} onClose={() => setEditing(null)} transferId={editing} />
     </div>
   );
 }

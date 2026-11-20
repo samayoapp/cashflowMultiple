@@ -7,6 +7,7 @@ import { Badge, Button, Card, cn, EmptyState, ErrorBox, Loading, Tabs, Toggle, u
 import { EntityDot } from '@/components/AppShell';
 import {
   ExecuteTransferModal,
+  InterUnitEditModal,
   LoanRepaymentModal,
   InternalTransferModal,
   ObligationFormModal,
@@ -142,6 +143,7 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
   const [move, setMove] = useState<ObligationDto | null>(null);
   const [charging, setCharging] = useState(false);
   const [loanPay, setLoanPay] = useState<{ id: string; partial: boolean } | null>(null);
+  const [interEdit, setInterEdit] = useState<string | null>(null);
 
   const rows = useMemo<Row[]>(() => {
     const obs: Row[] = (data ?? [])
@@ -545,6 +547,9 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
                               <Button size="sm" variant="ghost" title="Reprogramar (ambas unidades)" onClick={() => setMove(o)}>
                                 <CalendarClock className="h-4 w-4" />
                               </Button>
+                              <Button size="sm" variant="ghost" title="Editar (ambas unidades)" onClick={() => setInterEdit(o.interUnit!.transferId)}>
+                                <Pencil className="h-4 w-4" />
+                              </Button>
                               <Button size="sm" variant="ghost" title="Cancelar el saldo pendiente" onClick={() => cancelLoan(o)}>
                                 <Ban className="h-4 w-4 text-rose-500" />
                               </Button>
@@ -614,6 +619,7 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
       <PaymentModal open={Boolean(pay)} onClose={() => setPay(null)} target={pay?.ob ?? null} full={pay?.full} defaultDate={pay?.date} />
       <RescheduleModal open={Boolean(move)} onClose={() => setMove(null)} target={move} />
       <ExecuteTransferModal open={Boolean(loanPay)} onClose={() => setLoanPay(null)} transfer={loanPay} partial={loanPay?.partial} />
+      <InterUnitEditModal open={Boolean(interEdit)} onClose={() => setInterEdit(null)} transferId={interEdit} />
       {!isIn && <CardChargeModal open={charging} onClose={() => setCharging(false)} />}
     </Card>
   );

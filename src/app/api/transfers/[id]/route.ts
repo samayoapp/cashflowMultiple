@@ -3,10 +3,10 @@ import { prisma } from '@/lib/server/db';
 import { conflict, notFound, ok, readJson, route } from '@/lib/server/api';
 import { requireUser } from '@/lib/server/auth';
 import { assertEntityAccess } from '@/lib/server/scope';
-import { createLoanRepaymentTx, payTransfer } from '@/lib/server/services';
+import { createLoanRepaymentTx, deleteInterUnitTransfer, payTransfer, updateInterUnitTransfer } from '@/lib/server/services';
 import { getSettings } from '@/lib/server/projection-data';
 import { transferDto, transferInclude } from '@/lib/server/dto';
-import { id, isoDate, nonNegativeMoney, positiveMoney } from '@/lib/validation';
+import { id, isoDate, nonNegativeMoney, optionalText, positiveMoney, shortText } from '@/lib/validation';
 import { todayInTz } from '@/lib/dates';
 
 export const dynamic = 'force-dynamic';
@@ -73,4 +73,35 @@ export const POST = route<{ params: { id: string } }>(async (req, { params }) =>
     userId: user.id,
   });
   return ok(transferDto(await load(t.id)));
+});
+
+const patchSchema = z.object({
+  description: shortText(200).optional(),
+  notes: optionalText(1000),
+  /** Categoría del gasto en la unidad que reembolsa (solo reembolsos). */
+  categoryId: id.optional().nullable(),
+  amountFrom: positiveMoney.optional(),
+  amountTo: positiveMoney.optional(),
+  date: isoDate.optional(),
+});
+
+/** Edita un reembolso o devolución entre unidades (ambas partidas a la vez). */
+export const PATCH = route<{ params: { id: string } }>(async (req, { params }) => {
+  const user = await requireUser();
+  const t = await load(params.id);
+  await assertEntityAccess(user, t.fromEntityId);
+  await assertEntityAccess(user, t.toEntityId);
+  const data = patchSchema.parse(await readJson(req));
+  await updateInterUnitTransfer({ transferId: t.id, ...data });
+  return ok(transferDto(await load(t.id)));
+});
+
+/** Elimina un reembolso o devolución entre unidades sin abonos (registrado por error). */
+export const DELETE = route<{ params: { id: string } }>(async (_req, { params }) => {
+  const user = await requireUser();
+  const t = await load(params.id);
+  await assertEntityAccess(user, t.fromEntityId);
+  await assertEntityAccess(user, t.toEntityId);
+  await deleteInterUnitTransfer(t.id);
+  return ok({ ok: true });
 });

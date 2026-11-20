@@ -33,3 +33,28 @@ export function splitTransferPayment(
   if (inn <= 0 || inn >= remIn) throw new Error('El monto recibido no cuadra con el saldo pendiente');
   return { out: payOut, in: inn, closes: false };
 }
+
+/**
+ * Nuevo monto de una transferencia entre unidades al EDITARLA (p. ej. corregir un reembolso).
+ * `newFrom`: lo que debe la unidad origen (su moneda). `newTo`: lo que recibe el destino;
+ * si no se indica, es igual (misma moneda) o se convierte a la misma tasa que tenía.
+ * Ningún lado puede quedar en o por debajo de lo ya abonado: para dejarlo en lo abonado se cancela el saldo.
+ */
+export function editTransferAmounts(args: {
+  oldFrom: Cents;
+  oldTo: Cents;
+  paidFrom: Cents;
+  paidTo: Cents;
+  newFrom: Cents;
+  newTo?: Cents;
+  sameCurrency: boolean;
+}): { from: Cents; to: Cents } {
+  const { oldFrom, oldTo, paidFrom, paidTo, newFrom, sameCurrency } = args;
+  if (newFrom <= 0) throw new Error('El monto debe ser mayor que cero');
+  const to = sameCurrency ? newFrom : (args.newTo ?? Math.round((newFrom * oldTo) / oldFrom));
+  if (to <= 0) throw new Error('El monto recibido debe ser mayor que cero');
+  if (newFrom <= paidFrom || to <= paidTo) {
+    throw new Error('El monto debe ser mayor que lo ya abonado; para dejarlo en lo abonado, cancela el saldo pendiente');
+  }
+  return { from: newFrom, to };
+}

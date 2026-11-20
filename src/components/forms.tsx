@@ -1631,6 +1631,159 @@ export function LoanRepaymentModal({ open, onClose, loan }: { open: boolean; onC
   );
 }
 
+// ---------------------------------------------------------------- Editar reembolso / devolución entre unidades
+/**
+ * Edita los detalles de un reembolso o devolución de préstamo entre unidades. Cambia las dos partidas
+ * (CxP en quien debe y CxC en quien cobra) a la vez y no mueve caja. Sin abonos, también se puede eliminar.
+ */
+export function InterUnitEditModal({ open, onClose, transferId }: { open: boolean; onClose: () => void; transferId: string | null }) {
+  const app = useApp();
+  const toast = useToast();
+  const { loading, error, run, setError } = useSubmit();
+  const { data: t } = useApi<TransferDto>(open && transferId ? `/api/transfers/${transferId}` : null);
+  const isReimb = Boolean(t?.isReimbursement);
+  const catalog = useApi<{ categories: { id: string; name: string; direction: 'IN' | 'OUT' }[] }>(
+    open && t && isReimb ? `/api/catalog?ctx=${t.fromEntityId}` : null,
+  );
+  const [description, setDescription] = useState('');
+  const [date, setDate] = useState('');
+  const [amountFrom, setAmountFrom] = useState('');
+  const [amountTo, setAmountTo] = useState('');
+  const [categoryId, setCategoryId] = useState('');
+  const [notes, setNotes] = useState('');
+
+  useEffect(() => {
+    if (!open || !t || t.id !== transferId) return;
+    setError(null);
+    setDescription((t.description ?? '').replace(/^Reembolso:\s*/, ''));
+    setDate(t.expectedDate);
+    setAmountFrom(centsInput(t.amountFrom));
+    setAmountTo(centsInput(t.amountTo));
+    setCategoryId(t.categoryId ?? '');
+    setNotes(t.notes ?? '');
+  }, [open, t, transferId, setError]);
+
+  if (!open || !t || t.id !== transferId) return null;
+  const from = app.entityById.get(t.fromEntityId);
+  const to = app.entityById.get(t.toEntityId);
+  const curFrom = from?.currency ?? 'HNL';
+  const curTo = to?.currency ?? 'HNL';
+  const sameCurrency = curFrom === curTo;
+  const hasPayments = t.paidFrom > 0 || t.paidTo > 0;
+  const amountLocked = !isReimb || t.chargeLinked;
+  const canDelete = !hasPayments && !t.chargeLinked;
+  const outCategories = (catalog.data?.categories ?? []).filter((c) => c.direction === 'OUT');
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    const body: Record<string, unknown> = { description, date, notes: notes.trim() || null };
+    if (isReimb) body.categoryId = categoryId || null;
+    if (!amountLocked) {
+      const af = parseMoneyInput(amountFrom);
+      if (!af || Number(af) <= 0) return setError('Monto inválido');
+      body.amountFrom = af;
+      if (!sameCurrency) {
+        const at = parseMoneyInput(amountTo);
+        if (!at || Number(at) <= 0) return setError(`Indica el monto en ${curTo}`);
+        body.amountTo = at;
+      }
+    }
+    const ok = await run(() => api(`/api/transfers/${t!.id}`, { method: 'PATCH', body }), 'Cambios guardados en ambas unidades');
+    if (ok) onClose();
+  }
+
+  async function remove() {
+    if (!confirm(`¿Eliminar definitivamente este ${isReimb ? 'reembolso' : 'registro de devolución'}? Se borra la CxP de ${from?.name} y la CxC de ${to?.name}. No se puede deshacer.`)) return;
+    try {
+      await api(`/api/transfers/${t!.id}`, { method: 'DELETE' });
+      toast(isReimb ? 'Reembolso eliminado' : 'Devolución eliminada');
+      emitDataChanged();
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Error');
+    }
+  }
+
+  return (
+    <Modal open={open} onClose={onClose} title={isReimb ? 'Editar reembolso entre unidades' : 'Editar devolución de préstamo'}>
+      <form onSubmit={submit} className="space-y-3">
+        {error && <ErrorBox message={error} />}
+        <p className="text-sm text-slate-600 dark:text-slate-400">
+          {from?.name} le debe a {to?.name}. Los cambios se aplican en las dos unidades y no mueven saldos.
+        </p>
+        <Field label="Descripción">
+          <input className="input" value={description} onChange={(e) => setDescription(e.target.value)} required maxLength={180} />
+        </Field>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label={`Monto (${curFrom})`} hint={hasPayments ? `Ya abonado: ${formatMoney(t.paidFrom, curFrom)}` : undefined}>
+            <input
+              className="input text-right"
+              inputMode="decimal"
+              value={amountFrom}
+              onChange={(e) => setAmountFrom(e.target.value)}
+              disabled={amountLocked}
+              required
+            />
+          </Field>
+          {!sameCurrency ? (
+            <Field label={`Recibe ${to?.name} (${curTo})`}>
+              <input className="input text-right" inputMode="decimal" value={amountTo} onChange={(e) => setAmountTo(e.target.value)} disabled={amountLocked} />
+            </Field>
+          ) : (
+            <Field label={isReimb ? 'Fecha de reembolso' : 'Fecha de devolución'}>
+              <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
+            </Field>
+          )}
+        </div>
+        {!sameCurrency && (
+          <Field label={isReimb ? 'Fecha de reembolso' : 'Fecha de devolución'}>
+            <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
+          </Field>
+        )}
+        {amountLocked && (
+          <p className="text-xs text-slate-500">
+            {t.chargeLinked
+              ? 'El monto lo define el consumo de tarjeta al que está ligado.'
+              : 'El monto de una devolución lo define el préstamo y su interés.'}
+          </p>
+        )}
+        {isReimb && (
+          <Field label={`Categoría del gasto en ${from?.name}`}>
+            <select className="input" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
+              <option value="">Sin categoría</option>
+              {outCategories.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
+        <Field label="Notas">
+          <textarea className="input min-h-[60px]" value={notes} onChange={(e) => setNotes(e.target.value)} maxLength={1000} />
+        </Field>
+        <div className="flex items-center justify-between gap-2 pt-2">
+          <div>
+            {canDelete && (
+              <Button type="button" variant="ghost" onClick={remove} title="Eliminar (sin abonos registrados)">
+                <Trash2 className="h-4 w-4 text-rose-500" /> Eliminar
+              </Button>
+            )}
+          </div>
+          <div className="flex gap-2">
+            <Button type="button" onClick={onClose}>
+              Cancelar
+            </Button>
+            <Button type="submit" variant="primary" loading={loading}>
+              Guardar
+            </Button>
+          </div>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
 // ---------------------------------------------------------------- Transferencia entre cuentas de una entidad
 export function InternalTransferModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const app = useApp();
