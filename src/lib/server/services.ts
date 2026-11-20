@@ -540,21 +540,41 @@ export async function updateInterUnitTransfer(args: {
 }
 
 /**
- * Elimina por completo un reembolso o una devolución de préstamo entre unidades (p. ej. registrado
- * por error), con sus dos partidas. Solo si no tiene abonos en ningún lado; si los tiene, se cancela
- * el saldo pendiente. Una devolución eliminada deja el préstamo "sin devolución programada".
+ * Elimina por completo una transferencia entre unidades registrada por error, en cualquier estado
+ * (planificada, con abonos, ejecutada o cancelada). Si ya movió caja, la REVIERTE: borra sus abonos
+ * y los movimientos de caja en ambas unidades, así que sus saldos reales cambian.
+ * - Un préstamo se elimina junto con su devolución, salvo que la devolución ya tenga abonos
+ *   (entonces primero se elimina la devolución).
+ * - Una devolución eliminada deja el préstamo "sin devolución programada".
+ * - Un reembolso ligado a un consumo de tarjeta no se elimina (se cancela) para no descuadrar la tarjeta.
  */
-export async function deleteInterUnitTransfer(transferId: string) {
+export async function deleteTransfer(transferId: string) {
   return prisma.$transaction(async (tx) => {
-    const { t, paidFrom, paidTo } = await loadInterUnitForEdit(tx, transferId);
-    if (paidFrom > 0 || paidTo > 0 || t.status === 'EXECUTED') {
-      throw conflict('Tiene abonos registrados: no se puede eliminar; cancela el saldo pendiente en su lugar');
-    }
+    await tx.$queryRaw`SELECT id FROM "InterEntityTransfer" WHERE id = ${transferId} FOR UPDATE`;
+    const t = await tx.interEntityTransfer.findUnique({
+      where: { id: transferId },
+      include: {
+        reimbursedCharge: { select: { id: true } },
+        repayment: { select: { id: true, obligations: { select: { _count: { select: { payments: true } } } } } },
+      },
+    });
+    if (!t) throw notFound('Transferencia no encontrada');
     if (t.reimbursedCharge) {
       throw conflict('Está ligado a un consumo de tarjeta: cancélalo en su lugar (el consumo podrá asignarse de nuevo)');
     }
+    const ids = [t.id];
+    if (t.repayment) {
+      if (t.repayment.obligations.some((o) => o._count.payments > 0)) {
+        throw conflict('La devolución de este préstamo ya tiene abonos: elimina primero la devolución y luego el préstamo');
+      }
+      ids.push(t.repayment.id);
+    }
+    // Revertir: abonos y movimientos de caja de ambos lados (los abonos apuntan al movimiento)
+    const payments = await tx.payment.deleteMany({ where: { obligation: { transferId: { in: ids } } } });
+    const movements = await tx.cashMovement.deleteMany({ where: { transferId: { in: ids } } });
     // Las partidas espejo se borran en cascada
-    await tx.interEntityTransfer.delete({ where: { id: t.id } });
+    await tx.interEntityTransfer.deleteMany({ where: { id: { in: ids } } });
+    return { payments: payments.count, movements: movements.count, withRepayment: ids.length > 1 };
   });
 }
 

@@ -3,7 +3,7 @@ import { prisma } from '@/lib/server/db';
 import { conflict, notFound, ok, readJson, route } from '@/lib/server/api';
 import { requireUser } from '@/lib/server/auth';
 import { assertEntityAccess } from '@/lib/server/scope';
-import { createLoanRepaymentTx, deleteInterUnitTransfer, payTransfer, updateInterUnitTransfer } from '@/lib/server/services';
+import { createLoanRepaymentTx, deleteTransfer, payTransfer, updateInterUnitTransfer } from '@/lib/server/services';
 import { getSettings } from '@/lib/server/projection-data';
 import { transferDto, transferInclude } from '@/lib/server/dto';
 import { id, isoDate, nonNegativeMoney, optionalText, positiveMoney, shortText } from '@/lib/validation';
@@ -96,12 +96,11 @@ export const PATCH = route<{ params: { id: string } }>(async (req, { params }) =
   return ok(transferDto(await load(t.id)));
 });
 
-/** Elimina un reembolso o devolución entre unidades sin abonos (registrado por error). */
+/** Elimina una transferencia entre unidades registrada por error; si ya movió caja, la revierte. */
 export const DELETE = route<{ params: { id: string } }>(async (_req, { params }) => {
   const user = await requireUser();
   const t = await load(params.id);
   await assertEntityAccess(user, t.fromEntityId);
   await assertEntityAccess(user, t.toEntityId);
-  await deleteInterUnitTransfer(t.id);
-  return ok({ ok: true });
+  return ok(await deleteTransfer(t.id));
 });

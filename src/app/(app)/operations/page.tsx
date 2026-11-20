@@ -792,6 +792,33 @@ function TransfersTab() {
     }
   }
 
+  async function remove(t: TransferRow) {
+    const from = app.entityById.get(t.fromEntityId);
+    const to = app.entityById.get(t.toEntityId);
+    const label = t.repaymentOfId ? 'Devolución de préstamo' : t.isReimbursement ? 'Reembolso' : KIND[t.kind];
+    const moved = t.paidFrom > 0 || t.paidTo > 0;
+    const lines = [`¿Eliminar definitivamente "${label}${t.description ? `: ${t.description}` : ''}" (${from?.name} → ${to?.name})?`];
+    if (moved) {
+      lines.push(
+        '',
+        'Ya movió caja; se REVIERTEN sus movimientos:',
+        `• ${from?.name} recupera ${formatMoney(t.paidFrom, from?.currency ?? 'HNL')}`,
+        `• A ${to?.name} se le restan ${formatMoney(t.paidTo, to?.currency ?? 'HNL')}`,
+        'Los saldos reales de ambas unidades cambian.',
+      );
+    }
+    if (t.kind === 'LOAN' && !t.repaymentOfId && t.repayment) lines.push('', 'También se elimina su devolución programada.');
+    lines.push('', 'No se puede deshacer.');
+    if (!confirm(lines.join('\n'))) return;
+    try {
+      await api(`/api/transfers/${t.id}`, { method: 'DELETE' });
+      toast(moved ? 'Transferencia eliminada y caja revertida' : 'Transferencia eliminada');
+      emitDataChanged();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'Error', 'error');
+    }
+  }
+
   async function voidInternal(t: InternalTransferRow) {
     if (!confirm('¿Anular esta transferencia entre cuentas? Se revierten los saldos de ambas cuentas.')) return;
     try {
@@ -984,6 +1011,11 @@ function TransfersTab() {
                         {t.status === 'PLANNED' && (
                           <Button size="sm" variant="ghost" onClick={() => cancel(t)} title={t.repaymentOfId || t.isReimbursement ? 'Cancelar saldo pendiente' : 'Cancelar'}>
                             <Ban className="h-4 w-4 text-rose-500" />
+                          </Button>
+                        )}
+                        {!t.chargeLinked && (
+                          <Button size="sm" variant="ghost" onClick={() => remove(t)} title={t.paidFrom > 0 || t.paidTo > 0 ? 'Eliminar y revertir (registrada por error)' : 'Eliminar (registrada por error)'}>
+                            <Trash2 className="h-4 w-4 text-rose-500" />
                           </Button>
                         )}
                       </div>
