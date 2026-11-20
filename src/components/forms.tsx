@@ -1749,8 +1749,10 @@ export function InterUnitEditModal({ open, onClose, transferId }: { open: boolea
   const curTo = to?.currency ?? 'HNL';
   const sameCurrency = curFrom === curTo;
   const hasPayments = t.paidFrom > 0 || t.paidTo > 0;
-  const amountLocked = !isReimb || t.chargeLinked;
-  const canDelete = !hasPayments && !t.chargeLinked;
+  const settled = t.status === 'EXECUTED';
+  const amountLocked = !isReimb || t.chargeLinked || settled;
+  const canDelete = !t.chargeLinked;
+  const label = isReimb ? 'reembolso' : 'devolución';
   const outCategories = (catalog.data?.categories ?? []).filter((c) => c.direction === 'OUT');
 
   async function submit(e: React.FormEvent) {
@@ -1778,7 +1780,9 @@ export function InterUnitEditModal({ open, onClose, transferId }: { open: boolea
     if (
       !(await confirmDialog({
         title: isReimb ? 'Eliminar reembolso' : 'Eliminar devolución',
-        message: `¿Eliminar definitivamente este ${isReimb ? 'reembolso' : 'registro de devolución'}? Se borra la CxP de ${from?.name} y la CxC de ${to?.name}. No se puede deshacer.`,
+        message: `¿Eliminar definitivamente este ${isReimb ? 'reembolso' : 'registro de devolución'}? Se borra la CxP de ${from?.name} y la CxC de ${to?.name}${
+          hasPayments ? ', junto con sus abonos y los movimientos de caja que generaron (los saldos de las cuentas se revierten)' : ''
+        }. No se puede deshacer.`,
         confirmLabel: 'Eliminar',
         tone: 'danger',
       }))
@@ -1787,6 +1791,26 @@ export function InterUnitEditModal({ open, onClose, transferId }: { open: boolea
     try {
       await api(`/api/transfers/${t!.id}`, { method: 'DELETE' });
       toast(isReimb ? 'Reembolso eliminado' : 'Devolución eliminada');
+      emitDataChanged();
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Error');
+    }
+  }
+
+  async function undoPayments() {
+    if (
+      !(await confirmDialog({
+        title: 'Deshacer abonos',
+        message: `Se borran los abonos de este ${label} (${formatMoney(t!.paidFrom, curFrom)}) y los movimientos de caja que generaron en ${from?.name} y ${to?.name}; los saldos de esas cuentas se revierten. Queda pendiente otra vez para que lo saldes con la cuenta correcta.`,
+        confirmLabel: 'Deshacer abonos',
+        tone: 'danger',
+      }))
+    )
+      return;
+    try {
+      await api(`/api/transfers/${t!.id}`, { body: { action: 'undo' } });
+      toast('Abonos deshechos: ya puedes saldarlo con la cuenta correcta');
       emitDataChanged();
       onClose();
     } catch (e) {
@@ -1831,9 +1855,21 @@ export function InterUnitEditModal({ open, onClose, transferId }: { open: boolea
             <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
           </Field>
         </div>
+        {hasPayments && (
+          <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800/50">
+            <span className="text-slate-600 dark:text-slate-400">
+              {settled ? 'Saldado' : 'Abonado'}: <b>{formatMoney(t.paidFrom, curFrom)}</b>. ¿Cuenta equivocada? Deshaz los abonos y vuelve a saldarlo.
+            </span>
+            <Button type="button" size="sm" onClick={undoPayments}>
+              <Undo2 className="h-4 w-4" /> Deshacer abonos
+            </Button>
+          </div>
+        )}
         {amountLocked && (
           <p className="text-xs text-slate-500">
-            {t.chargeLinked
+            {settled && !t.chargeLinked && isReimb
+              ? 'Ya está saldado: para cambiar el monto, deshaz primero sus abonos.'
+              : t.chargeLinked
               ? 'El monto lo define el consumo de tarjeta al que está ligado.'
               : 'El monto de una devolución lo define el préstamo y su interés.'}
           </p>
@@ -1856,7 +1892,7 @@ export function InterUnitEditModal({ open, onClose, transferId }: { open: boolea
         <div className="flex items-center justify-between gap-2 pt-2">
           <div>
             {canDelete && (
-              <Button type="button" variant="ghost" onClick={remove} title="Eliminar (sin abonos registrados)">
+              <Button type="button" variant="ghost" onClick={remove} title={hasPayments ? 'Eliminar y revertir su caja' : 'Eliminar'}>
                 <Trash2 className="h-4 w-4 text-rose-500" /> Eliminar
               </Button>
             )}

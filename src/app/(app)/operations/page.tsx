@@ -592,6 +592,16 @@ function ObligationsTab({ direction }: { direction: 'IN' | 'OUT' }) {
                               </Button>
                             </>
                           )}
+                          {o.status === 'SETTLED' && (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              title="Editar, deshacer abonos (cuenta equivocada) o eliminar"
+                              onClick={() => setInterEdit(o.interUnit!.transferId)}
+                            >
+                              <Pencil className="h-4 w-4" />
+                            </Button>
+                          )}
                         </div>
                       ) : (
                       <div className="flex justify-end gap-0.5">

@@ -174,6 +174,11 @@ export function InterUnitStatement() {
                                   </Button>
                                 </>
                               )}
+                              {(i.kind === 'REIMBURSEMENT' || i.kind === 'REPAYMENT') && i.state === 'SETTLED' && (
+                                <Button size="sm" variant="ghost" title="Editar, deshacer abonos (cuenta equivocada) o eliminar" onClick={() => setEditing(i.transferId)}>
+                                  <Pencil className="h-4 w-4" />
+                                </Button>
+                              )}
                               {i.state === 'NO_PLAN' && (
                                 <Button size="sm" onClick={() => program(i.transferId)} title="Crear la CxC/CxP de la devolución">
                                   <CalendarClock className="h-3.5 w-3.5" /> Programar devolución

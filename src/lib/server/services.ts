@@ -497,7 +497,8 @@ export async function updateInterUnitTransfer(args: {
 }) {
   return prisma.$transaction(async (tx) => {
     const { t, out, inn, paidFrom, paidTo } = await loadInterUnitForEdit(tx, args.transferId);
-    if (t.status !== 'PLANNED') throw conflict('Solo se edita lo que está pendiente (no saldado ni cancelado)');
+    if (t.status === 'CANCELLED') throw conflict('Está cancelado: no se puede editar');
+    const settled = t.status === 'EXECUTED';
     const isReimb = t.isReimbursement;
 
     const transferData: Prisma.InterEntityTransferUpdateInput = {};
@@ -528,6 +529,7 @@ export async function updateInterUnitTransfer(args: {
       const changes = args.amountFrom !== oldFrom || (args.amountTo !== undefined && args.amountTo !== oldTo);
       if (changes) {
         if (!isReimb) throw badRequest('El monto de una devolución lo define el préstamo y su interés');
+        if (settled) throw conflict('Ya está saldado: deshaz sus abonos para cambiar el monto');
         if (t.reimbursedCharge) {
           throw conflict('Este reembolso está ligado a un consumo de tarjeta: su monto lo define ese consumo');
         }
@@ -580,6 +582,35 @@ export async function updateInterUnitTransfer(args: {
     await tx.obligation.update({ where: { id: out.id }, data: outData });
     await tx.obligation.update({ where: { id: inn.id }, data: inData });
     return { id: t.id };
+  });
+}
+
+/**
+ * Deshace TODOS los abonos de una transferencia entre unidades (p. ej. se registró con la cuenta
+ * equivocada): borra los abonos y sus movimientos de caja en ambas unidades y la deja pendiente,
+ * lista para volver a saldarse con la cuenta correcta. Las partidas y sus datos se conservan.
+ */
+export async function undoTransferPayments(transferId: string) {
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "InterEntityTransfer" WHERE id = ${transferId} FOR UPDATE`;
+    const t = await tx.interEntityTransfer.findUnique({
+      where: { id: transferId },
+      include: { repayment: { select: { obligations: { select: { _count: { select: { payments: true } } } } } } },
+    });
+    if (!t) throw notFound('Transferencia no encontrada');
+    if (t.status === 'CANCELLED') throw conflict('Está cancelada: no tiene abonos que deshacer');
+    if (t.repayment?.obligations.some((o) => o._count.payments > 0)) {
+      throw conflict('La devolución de este préstamo ya tiene abonos: deshazlos primero en la devolución');
+    }
+    const payments = await tx.payment.deleteMany({ where: { obligation: { transferId: t.id } } });
+    if (payments.count === 0) throw badRequest('No tiene abonos registrados');
+    const movements = await tx.cashMovement.deleteMany({ where: { transferId: t.id } });
+    await tx.obligation.updateMany({ where: { transferId: t.id }, data: { status: 'OPEN' } });
+    await tx.interEntityTransfer.update({
+      where: { id: t.id },
+      data: { status: 'PLANNED', executedDate: null, fromAccountId: null, toAccountId: null },
+    });
+    return { payments: payments.count, movements: movements.count };
   });
 }
 

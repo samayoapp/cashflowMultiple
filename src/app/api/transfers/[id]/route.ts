@@ -3,7 +3,7 @@ import { prisma } from '@/lib/server/db';
 import { badRequest, conflict, notFound, ok, readJson, route } from '@/lib/server/api';
 import { requireUser } from '@/lib/server/auth';
 import { assertEntityAccess } from '@/lib/server/scope';
-import { createLoanRepaymentTx, deleteTransfer, payTransfer, updateInterUnitTransfer } from '@/lib/server/services';
+import { createLoanRepaymentTx, deleteTransfer, payTransfer, undoTransferPayments, updateInterUnitTransfer } from '@/lib/server/services';
 import { getSettings } from '@/lib/server/projection-data';
 import { transferDto, transferInclude } from '@/lib/server/dto';
 import { id, isoDate, nonNegativeMoney, optionalText, positiveMoney, shortText } from '@/lib/validation';
@@ -40,6 +40,8 @@ const schema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('pay'), ...accounts, amountFrom: positiveMoney, amountTo: positiveMoney.optional() }),
   /** Cancela lo pendiente (si es un préstamo sin entregar, también su devolución). */
   z.object({ action: z.literal('cancel') }),
+  /** Deshace todos los abonos (y su caja) y la deja pendiente otra vez. */
+  z.object({ action: z.literal('undo') }),
   /** Programa la devolución de un préstamo ya registrado. */
   z.object({ action: z.literal('repayment'), dueDate: isoDate, interest: nonNegativeMoney.default(0) }),
 ]);
@@ -62,6 +64,10 @@ export const POST = route<{ params: { id: string } }>(async (req, { params }) =>
       await tx.interEntityTransfer.updateMany({ where: { id: { in: ids } }, data: { status: 'CANCELLED' } });
     });
     return ok({ status: 'CANCELLED' });
+  }
+
+  if (data.action === 'undo') {
+    return ok(await undoTransferPayments(t.id));
   }
 
   if (data.action === 'repayment') {
