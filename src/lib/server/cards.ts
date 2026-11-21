@@ -739,6 +739,11 @@ export async function getCardsSummary(entityIds: string[], today: ISODate) {
        */
       debtByCut: {
         ...buckets,
+        /** Consolidado en la moneda de la unidad (lo extranjero a la tasa vigente); null sin tasa. */
+        billedTotalBase: toBase(buckets.billed.foreign) === null ? null : buckets.billed.base + toBase(buckets.billed.foreign)!,
+        nextCutTotalBase: toBase(buckets.nextCut.foreign) === null ? null : buckets.nextCut.base + toBase(buckets.nextCut.foreign)!,
+        /** Algún estado de cuenta facturado ya tiene abonos. */
+        billedPartial: statements.some((s) => s.statementDate < (currentClose ?? '9999-12-31') && s.status === 'PARTIAL'),
         nextCutDate: currentClose,
         nextCutDueDate: currentClose && card.paymentDueDay ? dueDateFor(currentClose, card.paymentDueDay) : null,
       },

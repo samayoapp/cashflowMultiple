@@ -20,7 +20,7 @@ import { api, emitDataChanged, useApi } from '@/lib/client/api';
 import { AssignChargeModal, CardChargeModal, CardPaymentModal, cardStatusBadge, type AssignChargeTarget, type CardPaymentTarget } from '@/components/cards';
 import type { CardSummaryDto } from '@/lib/server/cards';
 import { formatMoney } from '@/lib/money';
-import { addDays, addMonths, endOfMonth, formatDateYear, formatShortDate } from '@/lib/dates';
+import { addDays, addMonths, diffDays, endOfMonth, formatDateYear, formatShortDate } from '@/lib/dates';
 import type { ObligationDto, RuleDto, UpcomingOccurrenceDto } from '@/lib/server/dto';
 
 type Tab = 'IN' | 'OUT' | 'cards' | 'rules';
@@ -841,6 +841,29 @@ interface StatementItem {
   pending: number;
 }
 
+/** Días que faltan para el pago a partir de los cuales una tarjeta se abre sola y se marca en ámbar. */
+const CARD_DUE_SOON_DAYS = 5;
+const CARDS_OPEN_KEY = 'cf.cards.open';
+
+type CardDto = CardSummaryDto;
+
+/** Estado del próximo pago de una tarjeta (lo ya facturado pendiente). */
+function cardDue(c: CardDto, today: string) {
+  const cut = c.debtByCut;
+  const pending = cut.billed.base + cut.billed.foreign > 0;
+  const days = pending && cut.billedDueDate ? diffDays(cut.billedDueDate, today) : null;
+  const tone: 'red' | 'amber' | 'ok' | 'none' = !pending ? 'none' : days !== null && days < 0 ? 'red' : days !== null && days <= CARD_DUE_SOON_DAYS ? 'amber' : 'ok';
+  return { pending, days, tone };
+}
+
+function readOpenState(): Record<string, boolean> {
+  try {
+    return JSON.parse(localStorage.getItem(CARDS_OPEN_KEY) ?? '{}') as Record<string, boolean>;
+  } catch {
+    return {};
+  }
+}
+
 function CardsTab() {
   const app = useApp();
   const { data, error, loading } = useApi<CardSummaryDto[]>(`/api/cards?ctx=${encodeURIComponent(app.ctx)}`);
@@ -848,16 +871,37 @@ function CardsTab() {
   const [pay, setPay] = useState<CardPaymentTarget | null>(null);
   const [assign, setAssign] = useState<AssignChargeTarget | null>(null);
   const [showPaid, setShowPaid] = useState(false);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const toggle = (k: string) =>
-    setExpanded((prev) => {
-      const n = new Set(prev);
-      if (n.has(k)) n.delete(k);
-      else n.add(k);
-      return n;
-    });
+  const [openState, setOpenState] = useState<Record<string, boolean>>(() => (typeof window === 'undefined' ? {} : readOpenState()));
+  const saveOpen = (next: Record<string, boolean>) => {
+    setOpenState(next);
+    try {
+      localStorage.setItem(CARDS_OPEN_KEY, JSON.stringify(next));
+    } catch {
+      /* sin almacenamiento: solo dura en esta visita */
+    }
+  };
 
   const cards = (data ?? []).filter((c) => !c.archived);
+  const isOpen = (c: CardDto) => openState[c.id] ?? ['red', 'amber'].includes(cardDue(c, app.today).tone);
+  const allOpen = cards.length > 0 && cards.every(isOpen);
+
+  /** Totales de todas las tarjetas, por moneda de la unidad (consolidado a la tasa vigente). */
+  const summary = useMemo(() => {
+    const by = new Map<string, { billed: number; next: number; debt: number; dueDates: Set<string>; cutDates: Set<string>; incomplete: boolean }>();
+    for (const c of cards) {
+      const cur = c.currency;
+      const t = by.get(cur) ?? { billed: 0, next: 0, debt: 0, dueDates: new Set(), cutDates: new Set(), incomplete: false };
+      const cut = c.debtByCut;
+      if (cut.billedTotalBase === null || cut.nextCutTotalBase === null || c.totalToPayBase === null) t.incomplete = true;
+      t.billed += cut.billedTotalBase ?? cut.billed.base;
+      t.next += cut.nextCutTotalBase ?? cut.nextCut.base;
+      t.debt += c.totalToPayBase ?? c.debt;
+      if (cut.billed.base + cut.billed.foreign > 0 && cut.billedDueDate) t.dueDates.add(cut.billedDueDate);
+      if (cut.nextCut.base + cut.nextCut.foreign > 0 && cut.nextCutDate) t.cutDates.add(cut.nextCutDate);
+      by.set(cur, t);
+    }
+    return Array.from(by.entries());
+  }, [cards]);
 
   if (error) return <ErrorBox message={error} />;
   if (loading && !data) return <Loading />;
@@ -870,245 +914,48 @@ function CardsTab() {
       </Card>
     );
 
+  const dates = (set: Set<string>) =>
+    Array.from(set)
+      .sort()
+      .map((d) => formatShortDate(d))
+      .join(', ');
+
   return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-sm text-slate-500">
-          Los consumos no restan caja el día de la compra: se proyectan como un solo pago en la fecha límite de cada estado de cuenta.
+    <div className="space-y-3">
+      <Card className="p-0 sm:p-0">
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-2 px-4 py-3">
+          {summary.map(([cur, t]) => (
+            <Fragment key={cur}>
+              <SummaryFigure label={t.dueDates.size ? `A pagar ${dates(t.dueDates)}` : 'A pagar'} value={formatMoney(t.billed, cur)} strong />
+              <SummaryFigure label={t.cutDates.size ? `Próximo corte ${dates(t.cutDates)}` : 'Próximo corte'} value={formatMoney(t.next, cur)} />
+              <SummaryFigure label="Deuda total" value={formatMoney(t.debt, cur)} />
+              {t.incomplete && <span className="text-xs text-amber-600">Falta tipo de cambio para consolidar</span>}
+            </Fragment>
+          ))}
+          <div className="ml-auto flex flex-wrap items-center gap-3">
+            <Toggle checked={showPaid} onChange={setShowPaid} label={<span className="text-sm">Estados pagados</span>} />
+            <Button size="sm" onClick={() => saveOpen(Object.fromEntries(cards.map((c) => [c.id, !allOpen])))}>
+              {allOpen ? 'Contraer todo' : 'Expandir todo'}
+            </Button>
+          </div>
+        </div>
+        <p className="border-t border-slate-100 px-4 py-1.5 text-[11px] text-slate-500 dark:border-slate-800">
+          Montos en dólares convertidos a la tasa vigente. Los consumos no restan caja el día de la compra: se pagan en la fecha límite de cada estado de cuenta.
         </p>
-        <Toggle checked={showPaid} onChange={setShowPaid} label={<span className="text-sm">Mostrar estados pagados</span>} />
-      </div>
-      {cards.map((c) => {
-        const e = app.entityById.get(c.entityId);
-        const cur = c.currency ?? e?.currency ?? 'HNL';
-        const fc = c.foreignCurrency;
-        const usage = c.creditLimit ? Math.min(100, Math.round((c.debt / c.creditLimit) * 100)) : null;
-        const usageF = fc && c.creditLimitForeign ? Math.min(100, Math.round((c.debtForeign / c.creditLimitForeign) * 100)) : null;
-        const statements = c.statements.filter((s) => showPaid || s.status !== 'PAID');
-        /** "L. x + $ y" según las monedas que tenga el monto */
-        const both = (m: { base: number; foreign: number }) =>
-          fc && m.foreign ? `${m.base ? `${formatMoney(m.base, cur)} + ` : ''}${formatMoney(m.foreign, fc)}` : formatMoney(m.base, cur);
-        const first = c.payments[0];
-        const lastGroup = !first ? [] : first.groupId ? c.payments.filter((p) => p.groupId === first.groupId) : [first];
-        return (
-          <Card key={c.id} className="p-0 sm:p-0">
-            <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 p-4 dark:border-slate-800">
-              <div>
-                <div className="flex items-center gap-2">
-                  {app.ctx === 'all' && e && <EntityDot color={e.color} />}
-                  <CreditCard className="h-4 w-4 text-slate-400" />
-                  <h3 className="font-semibold">{c.name}</h3>
-                  {c.institution && <span className="text-sm text-slate-500">{c.institution}</span>}
-                </div>
-                <p className="mt-0.5 text-xs text-slate-500">
-                  Corte día {c.statementDay} · pago día {c.paymentDueDay}
-                  {fc && (
-                    <>
-                      {' '}
-                      · <Badge tone="blue">Bimoneda {cur}/{fc}</Badge> · tasa {c.sellRate ?? '—'}
-                      {c.customSellRate ? ' (propia)' : ''}
-                    </>
-                  )}
-                </p>
-              </div>
-              <div className="flex gap-2">
-                <Button onClick={() => setCharge({ cardId: c.id, entityId: c.entityId })}>
-                  <Plus className="h-4 w-4" /> Nuevo consumo
-                </Button>
-                <Button
-                  variant="primary"
-                  disabled={c.debt <= 0 && c.debtForeign <= 0}
-                  onClick={() => setPay({ cardId: c.id, entityId: c.entityId, suggested: c.nextPayment?.pending })}
-                >
-                  <CreditCard className="h-4 w-4" /> Registrar pago
-                </Button>
-              </div>
-            </div>
-            {fc ? (
-              <div className="grid grid-cols-2 gap-4 p-4 lg:grid-cols-5">
-                <Stat label={`Saldo en ${cur}`} value={formatMoney(c.debt, cur)} tone="red" />
-                <Stat
-                  label={`Saldo en ${fc}`}
-                  value={formatMoney(c.debtForeign, fc)}
-                  tone="red"
-                  sub={c.debtForeignInBase === null ? 'Sin tipo de cambio' : `≈ ${formatMoney(c.debtForeignInBase, cur)} @ ${c.sellRate}`}
-                />
-                <Stat
-                  label={`Total consolidado a pagar (${cur})`}
-                  value={c.totalToPayBase === null ? '—' : formatMoney(c.totalToPayBase, cur)}
-                  tone="red"
-                  sub={c.nextPayment ? `Incluye el ciclo en curso y cuotas futuras` : undefined}
-                />
-                <Stat
-                  label="Próxima fecha de pago"
-                  value={c.nextPayment ? formatShortDate(c.nextPayment.dueDate) : '—'}
-                  sub={
-                    c.nextPayment
-                      ? `${both({ base: c.nextPayment.pending, foreign: c.nextPayment.pendingForeign })}${c.nextPayment.totalBase !== null && c.nextPayment.pendingForeign ? ` ≈ ${formatMoney(c.nextPayment.totalBase, cur)}` : ''}`
-                      : 'Sin pagos pendientes'
-                  }
-                  tone={c.nextPayment && c.nextPayment.dueDate < app.today ? 'red' : undefined}
-                />
-                <Stat
-                  label="Disponible"
-                  value={c.availableTotalBase === null ? 'Sin límite' : formatMoney(c.availableTotalBase, cur)}
-                  sub={[
-                    c.available !== null ? `${formatMoney(c.available, cur)}${usage !== null ? ` (${usage}% usado)` : ''}` : null,
-                    c.availableForeign !== null ? `${formatMoney(c.availableForeign, fc)}${usageF !== null ? ` (${usageF}% usado)` : ''}` : null,
-                  ]
-                    .filter(Boolean)
-                    .join(' · ') || undefined}
-                  bar={Math.max(usage ?? 0, usageF ?? 0) || (usage === null && usageF === null ? null : 0)}
-                />
-              </div>
-            ) : (
-              <div className="grid grid-cols-2 gap-4 p-4 lg:grid-cols-3">
-                <Stat
-                  label={c.nextPayment ? `A pagar el ${formatShortDate(c.nextPayment.dueDate)}` : 'Próximo pago'}
-                  value={c.nextPayment ? formatMoney(c.nextPayment.pending, cur) : '—'}
-                  sub={c.nextPayment ? (c.nextPayment.dueDate < app.today ? 'Vencido' : 'Estado de cuenta ya cortado') : 'Sin pagos pendientes'}
-                  tone="red"
-                />
-                <Stat
-                  label="Saldo total adeudado"
-                  value={formatMoney(c.debt, cur)}
-                  tone="red"
-                  sub={c.pendingInstallments.base !== c.debt ? `Cuotas por pagar: ${formatMoney(c.pendingInstallments.base, cur)}` : 'Incluye el ciclo en curso y cuotas futuras'}
-                />
-                <Stat
-                  label="Disponible"
-                  value={c.available === null ? 'Sin límite' : formatMoney(c.available, cur)}
-                  sub={usage === null ? undefined : `${usage}% usado de ${formatMoney(c.creditLimit!, cur)}`}
-                  bar={usage}
-                />
-              </div>
-            )}
-            {c.cycle && <CycleBar cycle={c.cycle} cur={cur} detail={fc && c.currentCycle.foreign ? both(c.currentCycle) : null} />}
-            {statements.length > 0 && (
-              <div className="overflow-x-auto border-t border-slate-200 dark:border-slate-800">
-                <table className="w-full">
-                  <thead className="bg-slate-50 dark:bg-slate-800/50">
-                    <tr>
-                      <th className="th">Estado de cuenta</th>
-                      <th className="th">Corte</th>
-                      <th className="th text-right">Total</th>
-                      <th className="th text-right">Pendiente</th>
-                      <th className="th">Estado</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {statements.map((s) => {
-                      const key = `${c.id}:${s.dueDate}`;
-                      const open = expanded.has(key);
-                      const st = cardStatusBadge[s.status];
-                      const items = s.items as StatementItem[];
-                      return (
-                        <Fragment key={key}>
-                          <tr className="cursor-pointer border-t border-slate-100 hover:bg-slate-50 dark:border-slate-800 dark:hover:bg-slate-800/40" onClick={() => toggle(key)}>
-                            <td className="td font-medium">
-                              <span className="inline-flex items-center gap-1">
-                                {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                                Pago {formatShortDate(s.dueDate)}
-                                <span className="text-xs font-normal text-slate-500">({items.length})</span>
-                              </span>
-                            </td>
-                            <td className="td text-slate-500">{formatShortDate(s.statementDate)}</td>
-                            <td className="td num">{both(s.total)}</td>
-                            <td
-                              className="td num font-semibold text-rose-700 dark:text-rose-400"
-                              title={fc && s.pending.foreign && s.pendingTotalBase !== null ? `≈ ${formatMoney(s.pendingTotalBase, cur)} @ ${c.sellRate}` : undefined}
-                            >
-                              {s.pending.base + s.pending.foreign === 0 ? '—' : both(s.pending)}
-                              {fc && s.pending.foreign > 0 && s.pendingTotalBase !== null && (
-                                <div className="text-[11px] font-normal text-slate-500">≈ {formatMoney(s.pendingTotalBase, cur)}</div>
-                              )}
-                            </td>
-                            <td className="td">
-                              <Badge tone={st.tone}>{st.label}</Badge>
-                            </td>
-                          </tr>
-                          {open &&
-                            items.map((i) => (
-                              <tr key={i.installmentId} className="border-t border-dashed border-slate-100 bg-slate-50/50 text-sm dark:border-slate-800 dark:bg-slate-800/20">
-                                <td className="td pl-10" colSpan={2}>
-                                  <div className="flex flex-wrap items-center gap-1.5">
-                                    <span>{i.description}</span>
-                                    {i.count > 1 && <Badge tone="blue">Cuota {i.number}/{i.count}</Badge>}
-                                    {i.openingKind === 'STATEMENT' && <Badge>Saldo inicial al corte</Badge>}
-                                    {i.openingKind === 'UNBILLED' && <Badge>Consumos iniciales desde el corte</Badge>}
-                                    {i.fromObligation && <Badge>Desde CxP</Badge>}
-                                    {i.reimbursement && (
-                                      <Badge tone="violet">
-                                        Gasto de {app.entityById.get(i.reimbursement.entityId)?.name ?? 'otra unidad'} ·{' '}
-                                        {i.reimbursement.status === 'EXECUTED' ? 'reembolsado' : 'por reembolsar'}
-                                      </Badge>
-                                    )}
-                                  </div>
-                                  <div className="text-xs text-slate-500">
-                                    {formatShortDate(i.purchaseDate)}
-                                    {i.categoryName && ` · ${i.categoryName}`}
-                                    {i.counterpartyName && ` · ${i.counterpartyName}`}
-                                    {i.count > 1 && ` · compra total ${formatMoney(i.chargeAmount, i.currency)}`}
-                                    {i.currency !== cur && i.rateAtTx && ` · tasa compra ${i.rateAtTx}`}
-                                  </div>
-                                </td>
-                                <td className="td num text-slate-500">{formatMoney(i.amount, i.currency)}</td>
-                                <td className="td num">{i.pending ? formatMoney(i.pending, i.currency) : '—'}</td>
-                                <td className="td text-right">
-                                  {!i.reimbursement && !i.isOpening && !i.fromObligation && i.number === 1 && app.activeEntities.length > 1 && (
-                                    <Button
-                                      size="sm"
-                                      variant="ghost"
-                                      title="Este consumo es de otra unidad: asignar el gasto y crear su reembolso"
-                                      onClick={() =>
-                                        setAssign({
-                                          chargeId: i.chargeId,
-                                          cardEntityId: c.entityId,
-                                          description: i.description,
-                                          purchaseDate: i.purchaseDate,
-                                          amountBase: i.chargeAmountBase,
-                                        })
-                                      }
-                                    >
-                                      <Building2 className="h-4 w-4 text-violet-600" />
-                                    </Button>
-                                  )}
-                                </td>
-                              </tr>
-                            ))}
-                        </Fragment>
-                      );
-                    })}
-                  </tbody>
-                  <TableTotals
-                    rows={statements}
-                    noun={['estado de cuenta', 'estados de cuenta']}
-                    columns={[
-                      null,
-                      null,
-                      (s) => [{ amount: s.total.base, currency: cur }, ...(fc && s.total.foreign ? [{ amount: s.total.foreign, currency: fc }] : [])],
-                      (s) => [{ amount: s.pending.base, currency: cur }, ...(fc && s.pending.foreign ? [{ amount: s.pending.foreign, currency: fc }] : [])],
-                      null,
-                    ]}
-                  />
-                </table>
-              </div>
-            )}
-            {lastGroup.length > 0 && (
-              <p className="border-t border-slate-200 px-4 py-2 text-xs text-slate-500 dark:border-slate-800">
-                Último pago: {formatShortDate(lastGroup[0].date)} desde {lastGroup[0].fromAccountName} ·{' '}
-                {lastGroup
-                  .map((p) =>
-                    p.currency !== cur
-                      ? `${formatMoney(p.amount, p.currency)} @ ${p.fxRateApplied} = ${formatMoney(p.bankAmount, cur)}${p.fxDifference ? ` (diferencial cambiario ${p.fxDifference > 0 ? '+' : ''}${formatMoney(p.fxDifference, cur)})` : ''}`
-                      : formatMoney(p.amount, cur),
-                  )
-                  .join(' + ')}
-              </p>
-            )}
-          </Card>
-        );
-      })}
+      </Card>
+
+      {cards.map((c) => (
+        <CardPanel
+          key={c.id}
+          card={c}
+          open={isOpen(c)}
+          onToggle={() => saveOpen({ ...openState, [c.id]: !isOpen(c) })}
+          showPaid={showPaid}
+          onCharge={() => setCharge({ cardId: c.id, entityId: c.entityId })}
+          onPay={() => setPay({ cardId: c.id, entityId: c.entityId, suggested: c.nextPayment?.pending })}
+          onAssign={setAssign}
+        />
+      ))}
       <CardChargeModal open={Boolean(charge)} onClose={() => setCharge(null)} entityId={charge?.entityId} cardId={charge?.cardId} />
       <CardPaymentModal open={Boolean(pay)} onClose={() => setPay(null)} target={pay} />
       <AssignChargeModal open={Boolean(assign)} onClose={() => setAssign(null)} target={assign} />
@@ -1116,70 +963,350 @@ function CardsTab() {
   );
 }
 
-/** Ciclo de facturación en curso: lo acumulado para el próximo corte, ritmo de gasto y presupuesto. */
-function CycleBar({ cycle, cur, detail }: { cycle: NonNullable<CardSummaryDto['cycle']>; cur: string; detail: string | null }) {
-  const pct = cycle.budget ? Math.round((cycle.accumulated / cycle.budget) * 100) : null;
-  const projPct = cycle.budget ? Math.round((cycle.projectedAtClose / cycle.budget) * 100) : null;
-  const over = cycle.budgetLeft !== null && cycle.budgetLeft < 0;
-  const willExceed = !over && projPct !== null && projPct > 100;
+function SummaryFigure({ label, value, strong }: { label: string; value: string; strong?: boolean }) {
   return (
-    <div className="border-t border-slate-200 bg-slate-50/60 px-4 py-3 dark:border-slate-800 dark:bg-slate-800/20">
-      <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
-        <p className="text-sm font-medium">
-          <CalendarClock className="mr-1 inline h-4 w-4 text-slate-400" />
-          Ciclo en curso: {formatShortDate(cycle.start)} → corte {formatShortDate(cycle.close)}
-          <span className="ml-2 text-xs font-normal text-slate-500">
-            {cycle.daysLeft === 0 ? 'corta hoy' : `faltan ${cycle.daysLeft} día${cycle.daysLeft === 1 ? '' : 's'}`} · día {cycle.daysElapsed} de{' '}
-            {cycle.daysTotal}
-          </span>
-        </p>
-        <p className="text-xs text-slate-500">
-          Se paga el <strong>{formatShortDate(cycle.dueDate)}</strong>
-        </p>
-      </div>
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-3">
-        <Stat
-          label="Acumulado para el próximo corte"
-          value={formatMoney(cycle.accumulated, cur)}
-          sub={detail ? `${detail} (convertido a la tasa vigente)` : 'Compras del ciclo + cuotas que caen en este corte'}
-          bar={pct === null ? undefined : Math.min(pct, 100)}
-        />
-        <Stat
-          label="Al ritmo actual cerrarías en"
-          value={formatMoney(cycle.projectedAtClose, cur)}
-          sub={cycle.daysElapsed < 5 ? 'Estimado poco confiable: el ciclo apenas empieza' : 'Si sigues gastando igual hasta el corte'}
-          tone={willExceed || over ? 'red' : undefined}
-        />
-        {cycle.budget !== null ? (
-          <Stat
-            label={`Presupuesto del ciclo (${formatMoney(cycle.budget, cur)})`}
-            value={over ? `Excedido ${formatMoney(-cycle.budgetLeft!, cur)}` : `Quedan ${formatMoney(cycle.budgetLeft!, cur)}`}
-            sub={
-              over
-                ? 'Ya pasaste el tope de este ciclo'
-                : `${formatMoney(cycle.dailyAllowance!, cur)} por día hasta el corte${willExceed ? ' · a este ritmo te pasarás' : ''}`
-            }
-            tone={over || willExceed ? 'red' : undefined}
-          />
-        ) : (
-          <Stat label="Presupuesto del ciclo" value="Sin definir" sub="Defínelo en Caja y Bancos → Cuentas → Editar" />
-        )}
-      </div>
+    <div>
+      <p className="text-[11px] uppercase tracking-wide text-slate-500">{label}</p>
+      <p className={cn('tabular-nums', strong ? 'text-lg font-semibold' : 'font-semibold text-slate-700 dark:text-slate-300')}>{value}</p>
     </div>
   );
 }
 
-function Stat({ label, value, sub, tone, bar }: { label: string; value: string; sub?: string; tone?: 'red'; bar?: number | null }) {
+const DUE_TONE = {
+  red: 'border-rose-300 bg-rose-50 dark:border-rose-900 dark:bg-rose-500/10',
+  amber: 'border-amber-300 bg-amber-50 dark:border-amber-900 dark:bg-amber-500/10',
+  ok: 'border-slate-200 dark:border-slate-700',
+  none: 'border-emerald-200 bg-emerald-50/60 dark:border-emerald-900 dark:bg-emerald-500/10',
+} as const;
+
+function CardPanel({
+  card: c,
+  open,
+  onToggle,
+  showPaid,
+  onCharge,
+  onPay,
+  onAssign,
+}: {
+  card: CardDto;
+  open: boolean;
+  onToggle: () => void;
+  showPaid: boolean;
+  onCharge: () => void;
+  onPay: () => void;
+  onAssign: (t: AssignChargeTarget) => void;
+}) {
+  const app = useApp();
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const toggle = (k: string) =>
+    setExpanded((prev) => {
+      const n = new Set(prev);
+      if (n.has(k)) n.delete(k);
+      else n.add(k);
+      return n;
+    });
+  const e = app.entityById.get(c.entityId);
+  const cur = c.currency ?? e?.currency ?? 'HNL';
+  const fc = c.foreignCurrency;
+  const cut = c.debtByCut;
+  const due = cardDue(c, app.today);
+  const statements = c.statements.filter((s) => showPaid || s.status !== 'PAID');
+  /** "L. x + $ y" según las monedas que tenga el monto */
+  const both = (m: { base: number; foreign: number }) =>
+    fc && m.foreign ? `${m.base ? `${formatMoney(m.base, cur)} + ` : ''}${formatMoney(m.foreign, fc)}` : formatMoney(m.base, cur);
+  const billedValue = cut.billedTotalBase ?? cut.billed.base;
+  const nextValue = cut.nextCutTotalBase ?? cut.nextCut.base;
+  const debtValue = c.totalToPayBase ?? c.debt;
+  const usage = c.creditLimit ? Math.min(100, Math.round((c.debt / c.creditLimit) * 100)) : null;
+  const first = c.payments[0];
+  const lastGroup = !first ? [] : first.groupId ? c.payments.filter((p) => p.groupId === first.groupId) : [first];
+  const dueText =
+    !due.pending || due.days === null
+      ? 'Al día: nada facturado pendiente'
+      : due.days < 0
+        ? `Vencido hace ${-due.days} día${due.days === -1 ? '' : 's'}`
+        : due.days === 0
+          ? 'Vence hoy'
+          : `Faltan ${due.days} día${due.days === 1 ? '' : 's'}`;
+  const canPay = c.debt > 0 || c.debtForeign > 0;
+
   return (
-    <div>
-      <p className="text-xs text-slate-500">{label}</p>
-      <p className={cn('text-lg font-semibold tabular-nums', tone === 'red' && 'text-rose-700 dark:text-rose-400')}>{value}</p>
-      {bar !== undefined && bar !== null && (
-        <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
-          <div className={cn('h-full rounded-full', bar >= 90 ? 'bg-rose-500' : bar >= 70 ? 'bg-amber-500' : 'bg-emerald-500')} style={{ width: `${bar}%` }} />
+    <Card className="p-0 sm:p-0">
+      {/* Encabezado del acordeón */}
+      <div
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        onClick={onToggle}
+        onKeyDown={(ev) => {
+          if (ev.key === 'Enter' || ev.key === ' ') {
+            ev.preventDefault();
+            onToggle();
+          }
+        }}
+        className="flex cursor-pointer flex-wrap items-center gap-x-6 gap-y-2 px-4 py-3 hover:bg-slate-50 dark:hover:bg-slate-800/30"
+      >
+        <div className="flex min-w-[220px] flex-1 items-center gap-2">
+          {open ? <ChevronDown className="h-4 w-4 shrink-0 text-slate-400" /> : <ChevronRight className="h-4 w-4 shrink-0 text-slate-400" />}
+          {app.ctx === 'all' && e && <EntityDot color={e.color} />}
+          <div className="min-w-0">
+            <h3 className="truncate font-semibold">{c.name}</h3>
+            <p className="truncate text-xs text-slate-500">
+              {[c.institution, `corte ${c.statementDay} / pago ${c.paymentDueDay}`, fc ? `${cur}/${fc}` : null].filter(Boolean).join(' · ')}
+            </p>
+          </div>
         </div>
+        {!open && (
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm">
+            <div>
+              <span className="text-xs text-slate-500">Al pago {cut.billedDueDate && due.pending ? formatShortDate(cut.billedDueDate) : ''} </span>
+              <span
+                className={cn(
+                  'font-semibold tabular-nums',
+                  due.tone === 'red' && 'text-rose-600',
+                  due.tone === 'amber' && 'text-amber-600',
+                  due.tone === 'none' && 'text-emerald-600',
+                )}
+              >
+                {due.pending ? formatMoney(billedValue, cur) : 'Al día'}
+              </span>
+              {due.pending && cut.billedPartial && (
+                <Badge tone="amber" className="ml-1">
+                  Parcial
+                </Badge>
+              )}
+            </div>
+            <div>
+              <span className="text-xs text-slate-500">Próx. corte {cut.nextCutDate ? formatShortDate(cut.nextCutDate) : ''} </span>
+              <span className="font-semibold tabular-nums">{formatMoney(nextValue, cur)}</span>
+            </div>
+            <div>
+              <span className="text-xs text-slate-500">Deuda </span>
+              <span className="font-semibold tabular-nums text-rose-700 dark:text-rose-400">{formatMoney(debtValue, cur)}</span>
+            </div>
+          </div>
+        )}
+        <div className="flex gap-2" onClick={(ev) => ev.stopPropagation()}>
+          {open && (
+            <Button onClick={onCharge}>
+              <Plus className="h-4 w-4" /> Nuevo consumo
+            </Button>
+          )}
+          <Button variant="primary" size={open ? undefined : 'sm'} disabled={!canPay} onClick={onPay}>
+            <CreditCard className="h-4 w-4" /> Registrar pago
+          </Button>
+        </div>
+      </div>
+
+      {open && (
+        <>
+          <div className="grid gap-3 border-t border-slate-200 p-4 dark:border-slate-800 lg:grid-cols-3">
+            {/* 1. Lo que se paga en la próxima fecha */}
+            <div className={cn('rounded-xl border p-3', DUE_TONE[due.tone])}>
+              <p className="text-[11px] font-medium uppercase tracking-wide text-slate-500">
+                {due.pending && cut.billedDueDate ? `A pagar el ${formatShortDate(cut.billedDueDate)}` : 'Próximo pago'}
+              </p>
+              <p
+                className={cn(
+                  'mt-1 text-2xl font-semibold tabular-nums',
+                  due.tone === 'red' && 'text-rose-700 dark:text-rose-400',
+                  due.tone === 'amber' && 'text-amber-700 dark:text-amber-400',
+                  due.tone === 'none' && 'text-emerald-700 dark:text-emerald-400',
+                )}
+              >
+                {due.pending ? formatMoney(billedValue, cur) : formatMoney(0, cur)}
+              </p>
+              {due.pending && fc && cut.billed.foreign > 0 && <p className="text-xs text-slate-500">{both(cut.billed)}</p>}
+              <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-slate-600 dark:text-slate-400">
+                {due.pending && cut.billedPartial && <Badge tone="amber">Pago parcial</Badge>}
+                {dueText}
+              </p>
+            </div>
+
+            {/* 2. Ciclo en curso */}
+            <CycleBlock card={c} value={nextValue} detail={fc && cut.nextCut.foreign ? both(cut.nextCut) : null} />
+
+            {/* 3. Deuda total */}
+            <div className="rounded-xl border border-slate-200 p-3 dark:border-slate-700">
+              <p className="text-[11px] font-medium uppercase tracking-wide text-slate-500">Deuda total</p>
+              <p className="mt-1 text-2xl font-semibold tabular-nums text-rose-700 dark:text-rose-400">{formatMoney(debtValue, cur)}</p>
+              {fc && (
+                <p className="text-xs text-slate-500">
+                  {formatMoney(c.debt, cur)} + {formatMoney(c.debtForeign, fc)}
+                  {c.sellRate ? ` @ ${c.sellRate}${c.customSellRate ? ' (propia)' : ''}` : ' · sin tipo de cambio'}
+                </p>
+              )}
+              {cut.later.base + cut.later.foreign > 0 && <p className="text-xs text-slate-500">Incluye cuotas futuras: {both(cut.later)}</p>}
+              <p className="mt-1 text-xs text-slate-600 dark:text-slate-400">
+                Disponible: {c.availableTotalBase === null ? 'sin límite' : formatMoney(c.availableTotalBase, cur)}
+                {usage !== null && ` · ${usage}% usado`}
+              </p>
+              {usage !== null && (
+                <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
+                  <div className={cn('h-full rounded-full', usage >= 90 ? 'bg-rose-500' : usage >= 70 ? 'bg-amber-500' : 'bg-emerald-500')} style={{ width: `${usage}%` }} />
+                </div>
+              )}
+            </div>
+          </div>
+
+          {statements.length > 0 && (
+            <div className="overflow-x-auto border-t border-slate-200 dark:border-slate-800">
+              <table className="w-full">
+                <thead className="bg-slate-50 dark:bg-slate-800/50">
+                  <tr>
+                    <th className="th">Estado de cuenta</th>
+                    <th className="th">Corte</th>
+                    <th className="th text-right">Total</th>
+                    <th className="th text-right">Pendiente</th>
+                    <th className="th">Estado</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {statements.map((s) => {
+                    const key = `${c.id}:${s.dueDate}`;
+                    const rowOpen = expanded.has(key);
+                    const st = cardStatusBadge[s.status];
+                    const items = s.items as StatementItem[];
+                    return (
+                      <Fragment key={key}>
+                        <tr className="cursor-pointer border-t border-slate-100 hover:bg-slate-50 dark:border-slate-800 dark:hover:bg-slate-800/40" onClick={() => toggle(key)}>
+                          <td className="td font-medium">
+                            <span className="inline-flex items-center gap-1">
+                              {rowOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                              Pago {formatShortDate(s.dueDate)}
+                              <span className="text-xs font-normal text-slate-500">({items.length})</span>
+                            </span>
+                          </td>
+                          <td className="td text-slate-500">{formatShortDate(s.statementDate)}</td>
+                          <td className="td num">{both(s.total)}</td>
+                          <td className="td num font-semibold">
+                            {s.pending.base + s.pending.foreign === 0 ? '—' : both(s.pending)}
+                            {fc && s.pending.foreign > 0 && s.pendingTotalBase !== null && (
+                              <div className="text-[11px] font-normal text-slate-500">≈ {formatMoney(s.pendingTotalBase, cur)}</div>
+                            )}
+                          </td>
+                          <td className="td">
+                            <Badge tone={st.tone}>{st.label}</Badge>
+                          </td>
+                        </tr>
+                        {rowOpen &&
+                          items.map((i) => (
+                            <tr key={i.installmentId} className="border-t border-dashed border-slate-100 bg-slate-50/50 text-sm dark:border-slate-800 dark:bg-slate-800/20">
+                              <td className="td pl-10" colSpan={2}>
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <span>{i.description}</span>
+                                  {i.count > 1 && <Badge tone="blue">Cuota {i.number}/{i.count}</Badge>}
+                                  {i.openingKind === 'STATEMENT' && <Badge>Saldo inicial al corte</Badge>}
+                                  {i.openingKind === 'UNBILLED' && <Badge>Consumos iniciales desde el corte</Badge>}
+                                  {i.fromObligation && <Badge>Desde CxP</Badge>}
+                                  {i.reimbursement && (
+                                    <Badge tone="violet">
+                                      Gasto de {app.entityById.get(i.reimbursement.entityId)?.name ?? 'otra unidad'} ·{' '}
+                                      {i.reimbursement.status === 'EXECUTED' ? 'reembolsado' : 'por reembolsar'}
+                                    </Badge>
+                                  )}
+                                </div>
+                                <div className="text-xs text-slate-500">
+                                  {formatShortDate(i.purchaseDate)}
+                                  {i.categoryName && ` · ${i.categoryName}`}
+                                  {i.counterpartyName && ` · ${i.counterpartyName}`}
+                                  {i.count > 1 && ` · compra total ${formatMoney(i.chargeAmount, i.currency)}`}
+                                  {i.currency !== cur && i.rateAtTx && ` · tasa compra ${i.rateAtTx}`}
+                                </div>
+                              </td>
+                              <td className="td num text-slate-500">{formatMoney(i.amount, i.currency)}</td>
+                              <td className="td num">{i.pending ? formatMoney(i.pending, i.currency) : '—'}</td>
+                              <td className="td text-right">
+                                {!i.reimbursement && !i.isOpening && !i.fromObligation && i.number === 1 && app.activeEntities.length > 1 && (
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    title="Este consumo es de otra unidad: asignar el gasto y crear su reembolso"
+                                    onClick={() =>
+                                      onAssign({
+                                        chargeId: i.chargeId,
+                                        cardEntityId: c.entityId,
+                                        description: i.description,
+                                        purchaseDate: i.purchaseDate,
+                                        amountBase: i.chargeAmountBase,
+                                      })
+                                    }
+                                  >
+                                    <Building2 className="h-4 w-4 text-violet-600" />
+                                  </Button>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                      </Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {lastGroup.length > 0 && (
+            <p className="border-t border-slate-200 px-4 py-2 text-xs text-slate-500 dark:border-slate-800">
+              Último pago: {formatShortDate(lastGroup[0].date)} desde {lastGroup[0].fromAccountName} ·{' '}
+              {lastGroup
+                .map((p) =>
+                  p.currency !== cur
+                    ? `${formatMoney(p.amount, p.currency)} @ ${p.fxRateApplied} = ${formatMoney(p.bankAmount, cur)}${p.fxDifference ? ` (diferencial cambiario ${p.fxDifference > 0 ? '+' : ''}${formatMoney(p.fxDifference, cur)})` : ''}`
+                    : formatMoney(p.amount, cur),
+                )
+                .join(' + ')}
+            </p>
+          )}
+        </>
       )}
-      {sub && <p className="mt-0.5 text-xs text-slate-500">{sub}</p>}
+    </Card>
+  );
+}
+
+/** Ciclo de facturación en curso: lo que va al próximo corte, avance del ciclo, ritmo y presupuesto. */
+function CycleBlock({ card: c, value, detail }: { card: CardDto; value: number; detail: string | null }) {
+  const cur = c.currency;
+  const cycle = c.cycle;
+  const cutDate = c.debtByCut.nextCutDate;
+  if (!cycle) {
+    return (
+      <div className="rounded-xl border border-slate-200 p-3 dark:border-slate-700">
+        <p className="text-[11px] font-medium uppercase tracking-wide text-slate-500">Próximo corte {cutDate ? formatShortDate(cutDate) : ''}</p>
+        <p className="mt-1 text-2xl font-semibold tabular-nums">{formatMoney(value, cur)}</p>
+        {detail && <p className="text-xs text-slate-500">{detail}</p>}
+        <p className="mt-1 text-xs text-slate-500">Configura el día de corte y de pago para ver el avance del ciclo.</p>
+      </div>
+    );
+  }
+  const dayPct = Math.min(100, Math.round((cycle.daysElapsed / Math.max(cycle.daysTotal, 1)) * 100));
+  const over = cycle.budgetLeft !== null && cycle.budgetLeft < 0;
+  const projPct = cycle.budget ? Math.round((cycle.projectedAtClose / cycle.budget) * 100) : null;
+  const willExceed = !over && projPct !== null && projPct > 100;
+  return (
+    <div className="rounded-xl border border-slate-200 p-3 dark:border-slate-700">
+      <p className="text-[11px] font-medium uppercase tracking-wide text-slate-500">
+        Ciclo en curso → corte {formatShortDate(cycle.close)}
+      </p>
+      <p className="mt-1 text-2xl font-semibold tabular-nums">{formatMoney(value, cur)}</p>
+      {detail && <p className="text-xs text-slate-500">{detail}</p>}
+      <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700" title={`Día ${cycle.daysElapsed} de ${cycle.daysTotal}`}>
+        <div className="h-full rounded-full bg-brand-500" style={{ width: `${dayPct}%` }} />
+      </div>
+      <p className="mt-1 text-xs text-slate-500">
+        Día {cycle.daysElapsed} de {cycle.daysTotal} · {cycle.daysLeft === 0 ? 'corta hoy' : `faltan ${cycle.daysLeft} día${cycle.daysLeft === 1 ? '' : 's'}`} · se paga el{' '}
+        {formatShortDate(cycle.dueDate)}
+      </p>
+      <p className={cn('text-xs', willExceed || over ? 'font-medium text-rose-600' : 'text-slate-600 dark:text-slate-400')}>
+        Al ritmo actual: {formatMoney(cycle.projectedAtClose, cur)}
+        {cycle.daysElapsed < 5 ? ' (estimado poco confiable)' : ''}
+      </p>
+      <p className={cn('text-xs', over ? 'font-medium text-rose-600' : 'text-slate-600 dark:text-slate-400')}>
+        {cycle.budget === null
+          ? 'Presupuesto: sin definir'
+          : over
+            ? `Presupuesto ${formatMoney(cycle.budget, cur)}: excedido ${formatMoney(-cycle.budgetLeft!, cur)}`
+            : `Presupuesto ${formatMoney(cycle.budget, cur)}: quedan ${formatMoney(cycle.budgetLeft!, cur)} (${formatMoney(cycle.dailyAllowance!, cur)}/día)`}
+      </p>
     </div>
   );
 }
