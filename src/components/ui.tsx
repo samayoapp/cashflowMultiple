@@ -274,6 +274,7 @@ export function TableTotals<T>({
   section,
   note,
   noun = ['partida', 'partidas'],
+  extra,
 }: {
   rows: readonly T[];
   columns: readonly (ColumnValue<T> | null)[];
@@ -281,6 +282,8 @@ export function TableTotals<T>({
   /** Aclaración junto al conteo, p. ej. "sin canceladas". */
   note?: string;
   noun?: [string, string];
+  /** Filas adicionales (<tr>) al final del pie, p. ej. un desglose. */
+  extra?: ReactNode;
 }) {
   const sumIdx = useMemo(() => columns.flatMap((c, i) => (c ? [i] : [])), [columns]);
   const totals = useMemo(
@@ -319,6 +322,7 @@ export function TableTotals<T>({
           </tr>
         );
       })}
+      {extra}
     </tfoot>
   );
 }

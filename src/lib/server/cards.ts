@@ -10,6 +10,8 @@ import { assertOnOrAfterOpening } from './account-opening';
 import {
   allocatePayment,
   buildSchedule,
+  cardDebtBuckets,
+  dueDateFor,
   nextDayOnOrAfter,
   statementCloseFor,
   statementForDueDate,
@@ -682,6 +684,15 @@ export async function getCardsSummary(entityIds: string[], today: ISODate) {
           })
         : null;
     const next = statements.find((s) => s.pending.base + s.pending.foreign > 0) ?? null;
+    const buckets = cardDebtBuckets(
+      mine.map((i) => ({
+        statementDate: isoOf(i.statementDate),
+        dueDate: isoOf(i.dueDate),
+        pending: cents(i.amount) - cents(i.settledAmount),
+        foreign: Boolean(i.currency && i.currency !== base),
+      })),
+      currentClose,
+    );
     const limit = card.creditLimit ? cents(card.creditLimit) : null;
     const limitForeign = card.creditLimitForeign ? cents(card.creditLimitForeign) : null;
     const available = limit === null ? null : limit - debt;
@@ -722,6 +733,15 @@ export async function getCardsSummary(entityIds: string[], today: ISODate) {
         ? { dueDate: next.dueDate, pending: next.pending.base, pendingForeign: next.pending.foreign, totalBase: next.pendingTotalBase }
         : null,
       statements,
+      /**
+       * Deuda separada por corte: facturado (a la fecha de pago), al próximo corte y cuotas futuras.
+       * Las cuotas suman lo comprado; ajustes de conciliación pueden hacer que difiera de `debt`.
+       */
+      debtByCut: {
+        ...buckets,
+        nextCutDate: currentClose,
+        nextCutDueDate: currentClose && card.paymentDueDay ? dueDateFor(currentClose, card.paymentDueDay) : null,
+      },
       payments: payments
         .filter((p) => p.cardAccountId === card.id)
         .map((p) => ({

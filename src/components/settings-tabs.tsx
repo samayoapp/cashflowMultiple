@@ -23,6 +23,8 @@ import { AccountFormModal, centsInput, EntityFormModal, parseMoneyInput } from '
 import { api, emitDataChanged, useApi } from '@/lib/client/api';
 import { centsToDecimalString, formatMoney, toCents } from '@/lib/money';
 import type { AccountDto, EntityDto } from '@/lib/server/dto';
+import type { CardSummaryDto } from '@/lib/server/cards';
+import { formatShortDate } from '@/lib/dates';
 
 function useAction() {
   const toast = useToast();
@@ -334,11 +336,97 @@ function CategoryMergeModal({ source, all, onClose }: { source: CategoryRow | nu
   );
 }
 
+// ---------------------------------------------------------------- Deuda de tarjetas por corte
+type DebtByCut = CardSummaryDto['debtByCut'];
+
+const sumMoney = (base: number, foreign: number, cur: string, foreignCur: string | null) =>
+  [formatMoney(base, cur), ...(foreignCur && foreign ? [`+ ${formatMoney(foreign, foreignCur)}`] : [])].join(' ');
+
+/** Debajo de la deuda de cada tarjeta: lo que vence en la fecha de pago y lo que va al próximo corte. */
+function CardCutDetail({ cut, cur, foreignCur, today }: { cut: DebtByCut | undefined; cur: string; foreignCur: string | null; today: string }) {
+  if (!cut) return null;
+  const billed = cut.billed.base + cut.billed.foreign;
+  const next = cut.nextCut.base + cut.nextCut.foreign;
+  const later = cut.later.base + cut.later.foreign;
+  const overdue = Boolean(cut.billedDueDate && cut.billedDueDate < today);
+  return (
+    <div className="mt-1 space-y-0.5 text-[11px] font-normal">
+      {billed > 0 && (
+        <div className={overdue ? 'font-semibold text-rose-600' : 'text-slate-600 dark:text-slate-400'}>
+          {overdue ? 'Vencido' : 'Al pago'} {cut.billedDueDate ? formatShortDate(cut.billedDueDate) : ''}: {sumMoney(cut.billed.base, cut.billed.foreign, cur, foreignCur)}
+        </div>
+      )}
+      {next > 0 && (
+        <div className="text-slate-500">
+          Próximo corte{cut.nextCutDate ? ` ${formatShortDate(cut.nextCutDate)}` : ''}: {sumMoney(cut.nextCut.base, cut.nextCut.foreign, cur, foreignCur)}
+        </div>
+      )}
+      {later > 0 && <div className="text-slate-400">Cuotas futuras: {sumMoney(cut.later.base, cut.later.foreign, cur, foreignCur)}</div>}
+    </div>
+  );
+}
+
+/** Filas del pie: deuda total de tarjetas separada en "a fecha de pago", "al próximo corte" y cuotas futuras. */
+function CardCutTotals({ accounts, cutById, today }: { accounts: AccountDto[]; cutById: Map<string, DebtByCut>; today: string }) {
+  const app = useApp();
+  const cards = accounts.filter((a) => a.type === 'CREDIT_CARD' && !a.archived && cutById.has(a.id));
+  if (!cards.length) return null;
+  type Line = { label: string; sub: string; tone?: string; totals: Map<string, number> };
+  const mk = (label: string, sub: string, tone?: string): Line => ({ label, sub, tone, totals: new Map() });
+  const billed = mk('Deuda a fecha de pago', '');
+  const next = mk('Saldo al próximo corte', '');
+  const later = mk('Cuotas a cortes futuros', 'compras a cuotas que se facturan después');
+  const dueDates = new Set<string>();
+  const cutDates = new Set<string>();
+  const add = (line: Line, cur: string, v: number) => v && line.totals.set(cur, (line.totals.get(cur) ?? 0) + v);
+  for (const a of cards) {
+    const cut = cutById.get(a.id)!;
+    const cur = app.entityById.get(a.entityId)?.currency ?? 'HNL';
+    add(billed, cur, cut.billed.base);
+    add(next, cur, cut.nextCut.base);
+    add(later, cur, cut.later.base);
+    if (a.foreignCurrency) {
+      add(billed, a.foreignCurrency, cut.billed.foreign);
+      add(next, a.foreignCurrency, cut.nextCut.foreign);
+      add(later, a.foreignCurrency, cut.later.foreign);
+    }
+    if (cut.billed.base + cut.billed.foreign > 0 && cut.billedDueDate) dueDates.add(cut.billedDueDate);
+    if (cut.nextCut.base + cut.nextCut.foreign > 0 && cut.nextCutDate) cutDates.add(cut.nextCutDate);
+  }
+  const fmtDates = (s: Set<string>) => Array.from(s).sort().map((d) => formatShortDate(d)).join(', ');
+  billed.sub = dueDates.size ? `ya facturado · vence ${fmtDates(dueDates)}` : 'nada facturado pendiente';
+  if (Array.from(dueDates).some((d) => d < today)) billed.tone = 'text-rose-600';
+  next.sub = cutDates.size ? `se factura en el corte del ${fmtDates(cutDates)}` : 'sin consumos en el ciclo en curso';
+  const lines = [billed, next, ...(later.totals.size ? [later] : [])];
+  return (
+    <>
+      {lines.map((l, k) => {
+        const entries = Array.from(l.totals.entries());
+        return (
+          <tr key={l.label} className={cn(k === 0 && 'border-t border-dashed border-slate-300 dark:border-slate-700')}>
+            <td className="td pl-6" colSpan={3}>
+              <span className="text-sm font-medium">↳ {l.label}</span>
+              <span className="ml-2 text-xs text-slate-500">{l.sub}</span>
+            </td>
+            <td className={cn('td num font-semibold', l.tone)}>
+              {entries.length ? entries.map(([cur, v]) => <div key={cur}>{formatMoney(v, cur)}</div>) : formatMoney(0, app.entityById.get(cards[0].entityId)?.currency ?? 'HNL')}
+            </td>
+            <td className="td" />
+          </tr>
+        );
+      })}
+    </>
+  );
+}
+
 // ---------------------------------------------------------------- Cuentas
 export function AccountsTab() {
   const app = useApp();
   const act = useAction();
   const { data, error, loading } = useApi<AccountDto[]>(`/api/accounts?ctx=${encodeURIComponent(app.ctx)}`);
+  const hasCards = Boolean(data?.some((a) => a.type === 'CREDIT_CARD' && !a.archived));
+  const cardsSummary = useApi<CardSummaryDto[]>(hasCards ? `/api/cards?ctx=${encodeURIComponent(app.ctx)}` : null);
+  const cutById = useMemo(() => new Map((cardsSummary.data ?? []).map((c) => [c.id, c.debtByCut])), [cardsSummary.data]);
   const [form, setForm] = useState<{ open: boolean; account: AccountDto | null }>({ open: false, account: null });
   const [reconciling, setReconciling] = useState<AccountDto | null>(null);
   const [actual, setActual] = useState('');
@@ -411,6 +499,7 @@ export function AccountsTab() {
                         {a.foreignCurrency && (
                           <div>{a.balanceForeign < 0 ? `+ ${formatMoney(-a.balanceForeign, a.foreignCurrency)}` : formatMoney(a.balanceForeign, a.foreignCurrency)}</div>
                         )}
+                        <CardCutDetail cut={cutById.get(a.id)} cur={e?.currency ?? 'HNL'} foreignCur={a.foreignCurrency} today={app.today} />
                       </td>
                     ) : (
                       <td className={cn('td num font-semibold', a.balance < 0 && 'text-rose-600')}>{formatMoney(a.balance, e?.currency ?? 'HNL')}</td>
@@ -465,6 +554,7 @@ export function AccountsTab() {
                 },
                 null,
               ]}
+              extra={<CardCutTotals accounts={data} cutById={cutById} today={app.today} />}
             />
           </table>
         </div>

@@ -191,3 +191,48 @@ export function cycleProgress(args: {
     dailyAllowance,
   };
 }
+
+/** Monto de una tarjeta separado por moneda: la de la unidad (base) y la extranjera (bimoneda). */
+export interface CardMoney {
+  base: Cents;
+  foreign: Cents;
+}
+
+export interface DebtInstallment {
+  statementDate: ISODate;
+  dueDate: ISODate;
+  /** Lo que falta pagar de la cuota. */
+  pending: Cents;
+  /** Cuota en la moneda extranjera de la tarjeta. */
+  foreign: boolean;
+}
+
+export interface CardDebtBuckets {
+  /** Ya facturado (cortes cerrados) y sin pagar: lo que se debe a la fecha de pago. */
+  billed: CardMoney;
+  /** Fecha de pago más próxima de lo facturado pendiente (puede estar vencida). */
+  billedDueDate: ISODate | null;
+  /** Lo que se factura en el próximo corte (ciclo en curso). */
+  nextCut: CardMoney;
+  /** Cuotas que caen en cortes posteriores al próximo. */
+  later: CardMoney;
+}
+
+/**
+ * Separa la deuda pendiente de una tarjeta según su corte: facturado (a pagar en la fecha de pago),
+ * al próximo corte y cuotas futuras. `currentClose` es el corte del ciclo en curso (el de hoy o el
+ * siguiente); sin día de corte configurado, todo cuenta como facturado.
+ */
+export function cardDebtBuckets(items: readonly DebtInstallment[], currentClose: ISODate | null): CardDebtBuckets {
+  const out: CardDebtBuckets = { billed: { base: 0, foreign: 0 }, billedDueDate: null, nextCut: { base: 0, foreign: 0 }, later: { base: 0, foreign: 0 } };
+  for (const i of items) {
+    if (i.pending <= 0) continue;
+    const k: keyof CardMoney = i.foreign ? 'foreign' : 'base';
+    if (!currentClose || i.statementDate < currentClose) {
+      out.billed[k] += i.pending;
+      if (!out.billedDueDate || i.dueDate < out.billedDueDate) out.billedDueDate = i.dueDate;
+    } else if (i.statementDate === currentClose) out.nextCut[k] += i.pending;
+    else out.later[k] += i.pending;
+  }
+  return out;
+}

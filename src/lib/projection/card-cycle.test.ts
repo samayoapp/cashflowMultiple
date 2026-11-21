@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   allocatePayment,
   buildSchedule,
+  cardDebtBuckets,
   cycleProgress,
   dueDateFor,
   installmentDates,
@@ -164,5 +165,41 @@ describe('ciclo en curso', () => {
     expect([c.close, c.daysLeft]).toEqual(['2026-12-03', 0]);
     const n = cycleProgress({ today: '2026-12-04', card: CONECTA, newSpend: 0, carried: 0 });
     expect([n.start, n.close, n.daysElapsed]).toEqual(['2026-12-04', '2027-01-03', 1]);
+  });
+});
+
+describe('deuda por corte', () => {
+  const close = '2026-12-03';
+  const items = [
+    // Facturado en noviembre, vence el 24-nov (parcialmente pagado)
+    { statementDate: '2026-11-03', dueDate: '2026-11-24', pending: 10_000, foreign: false },
+    { statementDate: '2026-11-03', dueDate: '2026-11-24', pending: 500, foreign: true },
+    // Facturado en octubre y vencido
+    { statementDate: '2026-10-03', dueDate: '2026-10-24', pending: 2_000, foreign: false },
+    // Ya pagada: no cuenta
+    { statementDate: '2026-11-03', dueDate: '2026-11-24', pending: 0, foreign: false },
+    // Ciclo en curso
+    { statementDate: close, dueDate: '2026-12-24', pending: 7_000, foreign: false },
+    { statementDate: close, dueDate: '2026-12-24', pending: 300, foreign: true },
+    // Cuotas futuras
+    { statementDate: '2027-01-03', dueDate: '2027-01-24', pending: 4_000, foreign: false },
+  ];
+
+  it('separa facturado, próximo corte y cuotas futuras por moneda', () => {
+    const b = cardDebtBuckets(items, close);
+    expect(b.billed).toEqual({ base: 12_000, foreign: 500 });
+    expect(b.billedDueDate).toBe('2026-10-24');
+    expect(b.nextCut).toEqual({ base: 7_000, foreign: 300 });
+    expect(b.later).toEqual({ base: 4_000, foreign: 0 });
+  });
+
+  it('sin día de corte, todo es facturado', () => {
+    const b = cardDebtBuckets(items, null);
+    expect(b.billed).toEqual({ base: 23_000, foreign: 800 });
+    expect(b.nextCut).toEqual({ base: 0, foreign: 0 });
+  });
+
+  it('sin deuda facturada no hay fecha de pago', () => {
+    expect(cardDebtBuckets([{ statementDate: close, dueDate: '2026-12-24', pending: 100, foreign: false }], close).billedDueDate).toBeNull();
   });
 });
