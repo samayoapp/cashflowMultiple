@@ -563,7 +563,7 @@ export default function MatrixPage() {
     <div className="space-y-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="text-xl font-semibold">Matriz de flujo</h1>
+          <h1 className="text-xl font-semibold">Tabla Cash</h1>
           <p className="text-sm text-slate-500">
             Montos en {currency}. Clic en un monto para editarlo; clic en otra columna para mover la fecha esperada.
             {whatIf ? ' Los cambios se guardan como simulación.' : ' Los cambios modifican los registros reales.'}

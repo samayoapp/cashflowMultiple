@@ -233,7 +233,7 @@ export function CardChargeModal({
           {mode === 'card' && (
             <Field label="Tarjeta">
               {accounts.data && cards.length === 0 ? (
-                <p className="text-sm text-rose-600">Esta unidad de negocio no tiene tarjetas. Créala en Ajustes → Cuentas y tarjetas.</p>
+                <p className="text-sm text-rose-600">Esta unidad de negocio no tiene tarjetas. Créala en Caja y Bancos → Cuentas.</p>
               ) : (
                 <select className="input" value={cardId} onChange={(e) => setCardId(e.target.value)} required disabled={Boolean(fixedCardId)}>
                   {cards.map((c) => (

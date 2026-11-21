@@ -4,14 +4,14 @@ import { useState } from 'react';
 import { useApp } from '@/components/AppContext';
 import { EntityDot } from '@/components/AppShell';
 import { Tabs } from '@/components/ui';
-import { AccountsTab, CategoriesTab, UnitTab } from '@/components/settings-tabs';
+import { CategoriesTab, UnitTab } from '@/components/settings-tabs';
 
-type Tab = 'accounts' | 'categories' | 'unit';
+type Tab = 'categories' | 'unit';
 
 /** Ajustes de la unidad de negocio seleccionada en el menú superior. */
 export default function UnitSettingsPage() {
   const app = useApp();
-  const [tab, setTab] = useState<Tab>('accounts');
+  const [tab, setTab] = useState<Tab>('categories');
   const unit = app.currentEntity;
   return (
     <div className="space-y-4">
@@ -31,7 +31,6 @@ export default function UnitSettingsPage() {
         </div>
         <Tabs<Tab>
           tabs={[
-            { id: 'accounts', label: 'Cuentas y tarjetas' },
             { id: 'categories', label: 'Categorías' },
             { id: 'unit', label: 'Datos e integración' },
           ]}
@@ -39,7 +38,6 @@ export default function UnitSettingsPage() {
           onChange={setTab}
         />
       </div>
-      {tab === 'accounts' && <AccountsTab />}
       {tab === 'categories' && <CategoriesTab />}
       {tab === 'unit' && <UnitTab />}
     </div>

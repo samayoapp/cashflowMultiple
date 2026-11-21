@@ -5,11 +5,10 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   ArrowLeftRight,
-  Bell,
   Check,
   ChevronDown,
   FlaskConical,
-  Inbox,
+  Landmark,
   LayoutDashboard,
   LogOut,
   Moon,
@@ -29,9 +28,10 @@ import { api } from '@/lib/client/api';
 
 const NAV = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { href: '/matrix', label: 'Matriz de flujo', icon: Table2 },
+  { href: '/matrix', label: 'Tabla Cash', icon: Table2 },
   { href: '/operations', label: 'CxC / CxP', icon: ArrowLeftRight },
-  { href: '/inbox', label: 'Bandeja externa', icon: Inbox },
+  { href: '/cash', label: 'Caja y Bancos', icon: Landmark },
+  // Bandeja externa (/inbox) oculta hasta trabajar la integración con sistemas externos
   { href: '/unit-settings', label: 'Ajustes', icon: SlidersHorizontal },
   { href: '/settings', label: 'Configuración', icon: Settings },
 ];
@@ -193,9 +193,6 @@ export function AppShell({ children }: { children: ReactNode }) {
             >
               <n.icon className="h-4 w-4" />
               {n.label}
-              {n.href === '/inbox' && app.pendingStaging > 0 && (
-                <span className="ml-auto rounded-full bg-amber-500 px-1.5 text-[10px] font-bold text-white">{app.pendingStaging}</span>
-              )}
             </Link>
           ))}
         </nav>
@@ -235,14 +232,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
           <FxIndicator />
           <div className="ml-auto flex items-center gap-1">
-            <Link href="/inbox" className="relative rounded-lg p-2 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="Bandeja externa">
-              <Bell className="h-4 w-4" />
-              {app.pendingStaging > 0 && (
-                <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-amber-500 px-1 text-[10px] font-bold text-white">
-                  {app.pendingStaging}
-                </span>
-              )}
-            </Link>
+            {/* Campana de la bandeja externa: oculta hasta trabajar la integración */}
             <ThemeToggle />
             <button onClick={logout} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 lg:hidden" aria-label="Cerrar sesión">
               <LogOut className="h-4 w-4" />
@@ -266,7 +256,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         </nav>
         {app.whatIf && (
           <div className="border-t border-violet-200 bg-violet-600 px-4 py-1 text-center text-xs font-medium text-white dark:border-violet-900 sm:px-6">
-            Modo simulación activo: los cambios en la matriz son hipotéticos y no alteran los registros reales.
+            Modo simulación activo: los cambios en la Tabla Cash son hipotéticos y no alteran los registros reales.
           </div>
         )}
       </header>

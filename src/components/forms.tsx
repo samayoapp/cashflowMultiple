@@ -943,7 +943,7 @@ export function PaymentModal({
           {target.description} · Pendiente: <strong>{formatMoney(target.remaining, currency)}</strong>
         </p>
         {accounts.data && active.length === 0 ? (
-          <ErrorBox message="Esta unidad de negocio no tiene cuentas activas. Crea una en Ajustes → Cuentas y tarjetas." />
+          <ErrorBox message="Esta unidad de negocio no tiene cuentas activas. Crea una en Caja y Bancos → Cuentas." />
         ) : (
           <Field label={target.direction === 'IN' ? '¿A qué cuenta cae el dinero?' : 'Cuenta que paga'}>
             <select className="input" value={accountId} onChange={(e) => setAccountId(e.target.value)} required autoFocus={mustChoose}>
