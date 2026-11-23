@@ -17,7 +17,7 @@ import {
   RescheduleModal,
 } from '@/components/forms';
 import { api, emitDataChanged, useApi } from '@/lib/client/api';
-import { AssignChargeModal, CardChargeModal, CardPaymentModal, cardStatusBadge, type AssignChargeTarget, type CardPaymentTarget } from '@/components/cards';
+import { AssignChargeModal, CardChargeModal, CardPaymentModal, CardPaymentsHistory, cardStatusBadge, type AssignChargeTarget, type CardPaymentTarget } from '@/components/cards';
 import type { CardSummaryDto } from '@/lib/server/cards';
 import { formatMoney } from '@/lib/money';
 import { addDays, addMonths, diffDays, endOfMonth, formatDateYear, formatShortDate } from '@/lib/dates';
@@ -1018,8 +1018,6 @@ function CardPanel({
   const nextValue = cut.nextCutTotalBase ?? cut.nextCut.base;
   const debtValue = c.totalToPayBase ?? c.debt;
   const usage = c.creditLimit ? Math.min(100, Math.round((c.debt / c.creditLimit) * 100)) : null;
-  const first = c.payments[0];
-  const lastGroup = !first ? [] : first.groupId ? c.payments.filter((p) => p.groupId === first.groupId) : [first];
   const dueText =
     !due.pending || due.days === null
       ? 'Al día: nada facturado pendiente'
@@ -1245,18 +1243,7 @@ function CardPanel({
               </table>
             </div>
           )}
-          {lastGroup.length > 0 && (
-            <p className="border-t border-slate-200 px-4 py-2 text-xs text-slate-500 dark:border-slate-800">
-              Último pago: {formatShortDate(lastGroup[0].date)} desde {lastGroup[0].fromAccountName} ·{' '}
-              {lastGroup
-                .map((p) =>
-                  p.currency !== cur
-                    ? `${formatMoney(p.amount, p.currency)} @ ${p.fxRateApplied} = ${formatMoney(p.bankAmount, cur)}${p.fxDifference ? ` (diferencial cambiario ${p.fxDifference > 0 ? '+' : ''}${formatMoney(p.fxDifference, cur)})` : ''}`
-                    : formatMoney(p.amount, cur),
-                )
-                .join(' + ')}
-            </p>
-          )}
+          <CardPaymentsHistory cardId={c.id} entityId={c.entityId} currency={cur} payments={c.payments} />
         </>
       )}
     </Card>

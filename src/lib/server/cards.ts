@@ -408,6 +408,79 @@ export async function payCreditCard(args: {
 }
 
 /**
+ * Un pago de tarjeta puede tener dos tramos (moneda local y extranjera) con el mismo `groupId`.
+ * Se edita y se deshace siempre el pago completo (todos sus tramos).
+ */
+async function loadPaymentGroup(tx: Tx, cardId: string, paymentId: string) {
+  const card = await lockCard(tx, cardId);
+  const p = await tx.cardPayment.findUnique({ where: { id: paymentId } });
+  if (!p || p.cardAccountId !== card.id) throw notFound('Pago no encontrado');
+  const legs = p.groupId ? await tx.cardPayment.findMany({ where: { groupId: p.groupId, cardAccountId: card.id } }) : [p];
+  return { card, legs };
+}
+
+/**
+ * Corrige un pago de tarjeta sin tocar sus montos ni su reparto entre cuotas:
+ * fecha efectiva, nota y cuenta de origen (p. ej. se registró con la cuenta equivocada).
+ * Para cambiar el monto, se deshace el pago y se registra de nuevo.
+ */
+export async function updateCardPayment(args: {
+  cardId: string;
+  paymentId: string;
+  date?: ISODate;
+  note?: string | null;
+  fromAccountId?: string;
+}) {
+  return prisma.$transaction(async (tx) => {
+    const { card, legs } = await loadPaymentGroup(tx, args.cardId, args.paymentId);
+    const currentFromId = legs[0].fromAccountId;
+    const from = await tx.account.findUnique({ where: { id: args.fromAccountId ?? currentFromId } });
+    if (!from || from.entityId !== card.entityId) throw badRequest('La cuenta de origen no pertenece a la unidad de negocio');
+    if (from.type === 'CREDIT_CARD') throw badRequest('Una tarjeta no puede pagarse con otra tarjeta');
+    const changesFrom = from.id !== currentFromId;
+    if (changesFrom && from.archivedAt) throw badRequest('La cuenta de origen está archivada');
+    const date = args.date ?? isoOf(legs[0].date);
+    if (changesFrom || date !== isoOf(legs[0].date)) await assertOnOrAfterOpening(tx, from, date);
+
+    for (const leg of legs) {
+      await tx.cardPayment.update({
+        where: { id: leg.id },
+        data: {
+          date: dbDate(date),
+          fromAccountId: from.id,
+          ...(args.note !== undefined ? { note: args.note } : {}),
+        },
+      });
+      await tx.cashMovement.update({ where: { id: leg.bankMovementId }, data: { date: dbDate(date), accountId: from.id } });
+      const cardMv = await tx.cashMovement.findUnique({ where: { id: leg.cardMovementId }, select: { description: true } });
+      const desc = cardMv?.description?.replace(/ \(desde [^)]*\)$/, ` (desde ${from.name})`) ?? null;
+      await tx.cashMovement.update({ where: { id: leg.cardMovementId }, data: { date: dbDate(date), description: desc } });
+    }
+    return { paymentIds: legs.map((l) => l.id) };
+  });
+}
+
+/**
+ * Deshace un pago de tarjeta registrado por error: borra sus movimientos (banco y tarjeta),
+ * revierte lo que liquidó en cada cuota y elimina el pago. La deuda y los estados de cuenta
+ * vuelven a quedar como antes del pago.
+ */
+export async function undoCardPayment(args: { cardId: string; paymentId: string }) {
+  return prisma.$transaction(async (tx) => {
+    const { legs } = await loadPaymentGroup(tx, args.cardId, args.paymentId);
+    const ids = legs.map((l) => l.id);
+    const allocations = await tx.cardPaymentAllocation.findMany({ where: { paymentId: { in: ids } } });
+    for (const a of allocations) {
+      await tx.cardInstallment.update({ where: { id: a.installmentId }, data: { settledAmount: { decrement: a.amount } } });
+    }
+    await tx.cardPaymentAllocation.deleteMany({ where: { paymentId: { in: ids } } });
+    await tx.cardPayment.deleteMany({ where: { id: { in: ids } } });
+    await tx.cashMovement.deleteMany({ where: { id: { in: legs.flatMap((l) => [l.bankMovementId, l.cardMovementId]) } } });
+    return { paymentIds: ids };
+  });
+}
+
+/**
  * Gasto pagado por un tercero (persona u otra entidad): registra el gasto con su categoría
  * y la CxP de reembolso a favor del dueño de la tarjeta.
  */
@@ -594,7 +667,10 @@ export async function getCardsSummary(entityIds: string[], today: ISODate) {
     }),
     prisma.cardPayment.findMany({
       where: { cardAccountId: { in: ids } },
-      include: { fromAccount: { select: { name: true } } },
+      include: {
+        fromAccount: { select: { name: true } },
+        allocations: { select: { amount: true, installment: { select: { dueDate: true } } } },
+      },
       orderBy: [{ date: 'desc' }, { createdAt: 'desc' }],
       take: 200,
     }),
@@ -758,8 +834,18 @@ export async function getCardsSummary(entityIds: string[], today: ISODate) {
           bankAmount: p.bankAmount ? cents(p.bankAmount) : cents(p.amount),
           fxRateApplied: p.fxRateApplied ? rateToString(rate4(p.fxRateApplied)) : null,
           fxDifference: cents(p.fxDifference),
+          fromAccountId: p.fromAccountId,
           fromAccountName: p.fromAccount.name,
           note: p.note,
+          /** Fechas de pago de los estados de cuenta a los que se aplicó, con su monto. */
+          appliedTo: Array.from(
+            p.allocations.reduce((m, a) => {
+              const d = isoOf(a.installment.dueDate);
+              return m.set(d, (m.get(d) ?? 0) + cents(a.amount));
+            }, new Map<ISODate, Cents>()),
+          )
+            .map(([dueDate, amount]) => ({ dueDate, amount }))
+            .sort((a, b) => a.dueDate.localeCompare(b.dueDate)),
         })),
     };
   });

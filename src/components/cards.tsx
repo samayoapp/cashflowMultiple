@@ -1,15 +1,16 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { CalendarClock, CreditCard } from 'lucide-react';
+import { CalendarClock, ChevronDown, ChevronRight, CreditCard, Pencil, Undo2 } from 'lucide-react';
 import type { AccountDto } from '@/lib/server/dto';
+import type { CardSummaryDto } from '@/lib/server/cards';
 import { api, emitDataChanged, useApi } from '@/lib/client/api';
 import { formatMoney, toCents, type Cents } from '@/lib/money';
 import { formatLongDate, formatShortDate } from '@/lib/dates';
 import { buildSchedule, paymentDateForPurchase } from '@/lib/projection/card-cycle';
 import { convertPair, rate4, rateToString } from '@/lib/projection/fx';
 import { useApp } from './AppContext';
-import { Badge, Button, ErrorBox, Field, Modal, Tabs, useToast } from './ui';
+import { Badge, Button, confirmDialog, ErrorBox, Field, Modal, Tabs, useToast } from './ui';
 import { centsInput, parseMoneyInput } from './forms';
 import { CategorySelect } from './CategorySelect';
 
@@ -672,6 +673,209 @@ export function AssignChargeModal({ open, onClose, target }: { open: boolean; on
           </Button>
           <Button type="submit" variant="primary" disabled={loading || options.length === 0}>
             Asignar y crear reembolso
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+// ---------------------------------------------------------------- Historial de pagos de tarjeta
+type CardPaymentLeg = CardSummaryDto['payments'][number];
+
+/** Agrupa los tramos (moneda local / extranjera) de un mismo pago, conservando el orden. */
+export function groupCardPayments(payments: CardPaymentLeg[]): CardPaymentLeg[][] {
+  const groups = new Map<string, CardPaymentLeg[]>();
+  for (const p of payments) {
+    const k = p.groupId ?? p.id;
+    groups.set(k, [...(groups.get(k) ?? []), p]);
+  }
+  return Array.from(groups.values());
+}
+
+/** "L 1,000.00 + $ 50.00 @ 24.7000 = L 1,235.00" */
+function legsText(legs: CardPaymentLeg[], cur: string) {
+  return legs
+    .map((p) =>
+      p.currency !== cur
+        ? `${formatMoney(p.amount, p.currency)} @ ${p.fxRateApplied} = ${formatMoney(p.bankAmount, cur)}`
+        : formatMoney(p.amount, cur),
+    )
+    .join(' + ');
+}
+
+export function CardPaymentsHistory({ cardId, entityId, currency: cur, payments }: { cardId: string; entityId: string; currency: string; payments: CardPaymentLeg[] }) {
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<CardPaymentLeg[] | null>(null);
+  const toast = useToast();
+  const groups = useMemo(() => groupCardPayments(payments), [payments]);
+  if (groups.length === 0) return null;
+  const last = groups[0];
+
+  async function undo(legs: CardPaymentLeg[]) {
+    const yes = await confirmDialog({
+      title: 'Deshacer pago de tarjeta',
+      message:
+        `¿Deshacer el pago del ${formatLongDate(legs[0].date)} desde ${legs[0].fromAccountName} por ${legsText(legs, cur)}?\n\n` +
+        'El dinero vuelve a la cuenta de origen y la deuda vuelve a la tarjeta (los estados de cuenta quedan pendientes otra vez). ' +
+        'Si el monto estaba mal, regístralo de nuevo con el monto correcto.',
+      confirmLabel: 'Deshacer pago',
+      tone: 'danger',
+    });
+    if (!yes) return;
+    try {
+      await api(`/api/cards/${cardId}/payments/${legs[0].id}`, { method: 'DELETE' });
+      toast('Pago deshecho');
+      emitDataChanged();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'Error', 'error');
+    }
+  }
+
+  return (
+    <div className="border-t border-slate-200 dark:border-slate-800">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="flex w-full flex-wrap items-center gap-x-2 gap-y-0.5 px-4 py-2 text-left text-xs text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800/30"
+        aria-expanded={open}
+      >
+        {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+        <span className="font-medium text-slate-700 dark:text-slate-300">Historial de pagos ({groups.length})</span>
+        {!open && (
+          <span>
+            · Último: {formatShortDate(last[0].date)} desde {last[0].fromAccountName} · {legsText(last, cur)}
+          </span>
+        )}
+      </button>
+      {open && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-xs text-slate-500">
+                <th className="th">Fecha</th>
+                <th className="th">Desde</th>
+                <th className="th text-right">Monto</th>
+                <th className="th">Aplicado a</th>
+                <th className="th">Nota</th>
+                <th className="th" />
+              </tr>
+            </thead>
+            <tbody>
+              {groups.map((legs) => {
+                const fx = legs.reduce((s, p) => s + p.fxDifference, 0);
+                const applied = Array.from(new Set(legs.flatMap((p) => p.appliedTo.map((a) => a.dueDate)))).sort();
+                return (
+                  <tr key={legs[0].id} className="border-t border-slate-100 dark:border-slate-800">
+                    <td className="td whitespace-nowrap">{formatShortDate(legs[0].date)}</td>
+                    <td className="td">{legs[0].fromAccountName}</td>
+                    <td className="td text-right tabular-nums">
+                      <div>{legsText(legs, cur)}</div>
+                      {fx !== 0 && (
+                        <div className="text-xs text-slate-500">
+                          Diferencial cambiario {fx > 0 ? '+' : ''}
+                          {formatMoney(fx, cur)}
+                        </div>
+                      )}
+                    </td>
+                    <td className="td text-xs text-slate-500">
+                      {applied.length === 0 ? '—' : applied.map((d) => `Pago del ${formatShortDate(d)}`).join(', ')}
+                    </td>
+                    <td className="td text-xs text-slate-500">{legs[0].note ?? ''}</td>
+                    <td className="td whitespace-nowrap text-right">
+                      <Button size="sm" variant="ghost" title="Corregir fecha, cuenta de origen o nota" onClick={() => setEditing(legs)}>
+                        <Pencil className="h-4 w-4" />
+                      </Button>
+                      <Button size="sm" variant="ghost" title="Deshacer pago (devuelve el dinero al banco y la deuda a la tarjeta)" onClick={() => undo(legs)}>
+                        <Undo2 className="h-4 w-4 text-rose-600" />
+                      </Button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <CardPaymentEditModal open={Boolean(editing)} onClose={() => setEditing(null)} cardId={cardId} entityId={entityId} currency={cur} legs={editing} />
+    </div>
+  );
+}
+
+function CardPaymentEditModal({
+  open,
+  onClose,
+  cardId,
+  entityId,
+  currency,
+  legs,
+}: {
+  open: boolean;
+  onClose: () => void;
+  cardId: string;
+  entityId: string;
+  currency: string;
+  legs: CardPaymentLeg[] | null;
+}) {
+  const { loading, error, run, setError } = useSubmit();
+  const accounts = useApi<AccountDto[]>(open ? `/api/accounts?ctx=${entityId}` : null);
+  const first = legs?.[0];
+  // La cuenta actual se ofrece aunque esté archivada (para poder dejarla como está)
+  const sources = useMemo(
+    () => (accounts.data ?? []).filter((a) => a.type !== 'CREDIT_CARD' && (!a.archived || a.id === first?.fromAccountId)),
+    [accounts.data, first?.fromAccountId],
+  );
+  const [date, setDate] = useState('');
+  const [fromAccountId, setFrom] = useState('');
+  const [note, setNote] = useState('');
+
+  useEffect(() => {
+    if (!open || !first) return;
+    setError(null);
+    setDate(first.date);
+    setFrom(first.fromAccountId);
+    setNote(first.note ?? '');
+  }, [open, first, setError]);
+
+  if (!legs || !first) return null;
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    const ok = await run(
+      () => api(`/api/cards/${cardId}/payments/${first!.id}`, { method: 'PATCH', body: { date, fromAccountId, note } }),
+      'Pago actualizado',
+    );
+    if (ok) onClose();
+  }
+
+  return (
+    <Modal open={open} onClose={onClose} title="Corregir pago de tarjeta">
+      <form onSubmit={submit} className="space-y-3">
+        {error && <ErrorBox message={error} />}
+        <div className="rounded-lg bg-slate-50 px-3 py-2 text-sm tabular-nums dark:bg-slate-800/60">{legsText(legs, currency)}</div>
+        <Field label="Cuenta de origen" hint="Si se registró con la cuenta equivocada, el débito se mueve a la cuenta correcta">
+          <select className="input" value={fromAccountId} onChange={(e) => setFrom(e.target.value)} required>
+            {sources.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name}
+                {a.archived ? ' (archivada)' : ''}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Fecha efectiva">
+          <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
+        </Field>
+        <Field label="Nota">
+          <input className="input" value={note} maxLength={300} onChange={(e) => setNote(e.target.value)} />
+        </Field>
+        <p className="text-xs text-slate-500">El monto no se edita aquí: para cambiarlo, deshaz el pago y regístralo de nuevo.</p>
+        <div className="flex justify-end gap-2 pt-2">
+          <Button type="button" onClick={onClose}>
+            Cancelar
+          </Button>
+          <Button type="submit" variant="primary" loading={loading} disabled={!fromAccountId || !date}>
+            Guardar
           </Button>
         </div>
       </form>
