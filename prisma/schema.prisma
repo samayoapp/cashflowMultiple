@@ -304,6 +304,8 @@ model Payment {
   cashMovementId String?       @unique
   /// Registro histórico: baja el saldo de la partida sin mover caja
   isHistorical   Boolean       @default(false)
+  /// Vinculado a un consumo de tarjeta ya registrado (no creó movimientos; deshacer solo desvincula)
+  linkedCharge   Boolean       @default(false)
   note           String?
   createdById    String?
   createdAt      DateTime      @default(now())

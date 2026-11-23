@@ -24,10 +24,19 @@ async function lockObligation(tx: Tx, id: string) {
 /**
  * Registra un abono (parcial o total). En una sola transacción:
  * crea el movimiento real de caja, el abono y actualiza el estado.
+ *
+ * Origen del dinero (exactamente uno):
+ *  - `accountId`: cuenta líquida o tarjeta (crea el movimiento / el consumo).
+ *  - `noCash`: registro sin mover caja (abono histórico, con nota obligatoria).
+ *  - `chargeId`: consumo de tarjeta ya registrado; se vincula sin crear movimientos y el monto
+ *    del abono es el del consumo (en la moneda de la unidad).
  */
 export interface RegisterPaymentArgs {
   obligationId: string;
-  accountId: string;
+  accountId?: string | null;
+  noCash?: boolean;
+  chargeId?: string | null;
+  /** Se ignora con `chargeId` (se usa el monto del consumo). */
   amount: Cents;
   date: ISODate;
   note?: string | null;
@@ -47,16 +56,48 @@ export async function registerPayment(args: RegisterPaymentArgs) {
   return prisma.$transaction((tx) => registerPaymentTx(tx, args));
 }
 
+/** Consumo de tarjeta que todavía puede vincularse a una partida de la unidad. */
+export const linkableChargeWhere = (entityId: string) =>
+  ({
+    entityId,
+    obligationId: null,
+    isOpening: false,
+    movement: { payment: null },
+    OR: [{ reimbursementTransferId: null }, { reimbursementTransfer: { status: 'CANCELLED' } }],
+  }) satisfies Prisma.CardChargeWhereInput;
+
 /** Igual que registerPayment, dentro de una transacción existente (p. ej. crear y liquidar a la vez). */
 export async function registerPaymentTx(tx: Tx, args: RegisterPaymentArgs) {
-  {
-    const { ob, paid, remaining } = await lockObligation(tx, args.obligationId);
-    if (ob.isHypothetical) throw conflict('Una partida hipotética no puede recibir abonos reales');
-    if (ob.transferId) throw conflict('Esta partida es una transferencia: usa "Ejecutar transferencia"');
-    if (ob.status === 'SETTLED' || ob.status === 'CANCELLED') throw conflict('La partida ya está cerrada');
-    if (!args.settle && args.amount > remaining) throw badRequest('El abono supera el saldo pendiente');
+  const { ob, paid, remaining } = await lockObligation(tx, args.obligationId);
+  if (ob.isHypothetical) throw conflict('Una partida hipotética no puede recibir abonos reales');
+  if (ob.transferId) throw conflict('Esta partida es una transferencia: usa "Ejecutar transferencia"');
+  if (ob.status === 'SETTLED' || ob.status === 'CANCELLED') throw conflict('La partida ya está cerrada');
+  const sources = [Boolean(args.accountId), Boolean(args.noCash), Boolean(args.chargeId)].filter(Boolean).length;
+  if (sources !== 1) throw badRequest('Indica la cuenta, un consumo de tarjeta o "sin mover caja"');
 
-    const account = await tx.account.findUnique({ where: { id: args.accountId } });
+  let amount = args.amount;
+  let date = args.date;
+  let accountId: string | null = null;
+  let cashMovementId: string | null = null;
+
+  if (args.chargeId) {
+    // Ya está en la tarjeta: se vincula el consumo existente; la deuda de la tarjeta no cambia
+    if (ob.direction === 'IN') throw badRequest('Un cobro no puede vincularse a un consumo de tarjeta');
+    await tx.$queryRaw`SELECT id FROM "CardCharge" WHERE id = ${args.chargeId} FOR UPDATE`;
+    const charge = await tx.cardCharge.findFirst({ where: { id: args.chargeId, ...linkableChargeWhere(ob.entityId) } });
+    if (!charge) throw badRequest('El consumo no existe o ya está vinculado a otra partida');
+    if (await tx.cardCharge.findUnique({ where: { obligationId: ob.id } })) {
+      throw conflict('Esta partida ya tiene un consumo de tarjeta asociado');
+    }
+    amount = cents(charge.amountBase ?? charge.amount);
+    date = isoOf(charge.purchaseDate);
+    accountId = charge.cardAccountId;
+    cashMovementId = charge.movementId;
+    await tx.cardCharge.update({ where: { id: charge.id }, data: { obligationId: ob.id } });
+  } else if (args.noCash) {
+    if (!args.note?.trim()) throw badRequest('Indica en la nota dónde quedó registrado el dinero');
+  } else {
+    const account = await tx.account.findUnique({ where: { id: args.accountId! } });
     if (!account || account.entityId !== ob.entityId) throw badRequest('La cuenta no pertenece a la unidad de negocio');
     if (account.archivedAt) throw badRequest('La cuenta está archivada');
     const isCard = account.type === 'CREDIT_CARD';
@@ -69,7 +110,6 @@ export async function registerPaymentTx(tx: Tx, args: RegisterPaymentArgs) {
         throw conflict('Esta partida ya fue pagada con tarjeta');
       }
     }
-
     const signed = ob.direction === 'IN' ? args.amount : -args.amount;
     const movement = await tx.cashMovement.create({
       data: {
@@ -96,38 +136,46 @@ export async function registerPaymentTx(tx: Tx, args: RegisterPaymentArgs) {
         userId: args.userId,
       });
     }
-    const payment = await tx.payment.create({
-      data: {
-        obligationId: ob.id,
-        accountId: account.id,
-        amount: dec(args.amount),
-        date: dbDate(args.date),
-        cashMovementId: movement.id,
-        note: args.note ?? null,
-        createdById: args.userId,
-      },
+    accountId = account.id;
+    cashMovementId = movement.id;
+  }
+
+  if (amount <= 0) throw badRequest('El monto debe ser mayor que cero');
+  if (!args.settle && amount > remaining) throw badRequest('El abono supera el saldo pendiente');
+
+  const payment = await tx.payment.create({
+    data: {
+      obligationId: ob.id,
+      accountId,
+      amount: dec(amount),
+      date: dbDate(date),
+      cashMovementId,
+      isHistorical: Boolean(args.noCash),
+      linkedCharge: Boolean(args.chargeId),
+      note: args.note?.trim() || null,
+      createdById: args.userId,
+    },
+  });
+  if (args.settle) {
+    const s = settleWithActual({
+      amount: cents(ob.amount),
+      projectedAmount: ob.projectedAmount === null ? null : cents(ob.projectedAmount),
+      paid,
+      payment: amount,
     });
-    if (args.settle) {
-      const s = settleWithActual({
-        amount: cents(ob.amount),
-        projectedAmount: ob.projectedAmount === null ? null : cents(ob.projectedAmount),
-        paid,
-        payment: args.amount,
-      });
-      await tx.obligation.update({
-        where: { id: ob.id },
-        data: { status: s.status, amount: dec(s.amount), projectedAmount: s.projectedAmount === null ? null : dec(s.projectedAmount) },
-      });
-      if (args.updateRule && ob.recurrenceId) await applyActualToRule(tx, ob.recurrenceId, ob.occurrenceDate, s.amount);
-      return { payment, remaining: 0 };
-    }
-    const newRemaining = remaining - args.amount;
     await tx.obligation.update({
       where: { id: ob.id },
-      data: { status: newRemaining === 0 ? 'SETTLED' : paid + args.amount > 0 ? 'PARTIAL' : 'OPEN' },
+      data: { status: s.status, amount: dec(s.amount), projectedAmount: s.projectedAmount === null ? null : dec(s.projectedAmount) },
     });
-    return { payment, remaining: newRemaining };
+    if (args.updateRule && ob.recurrenceId) await applyActualToRule(tx, ob.recurrenceId, ob.occurrenceDate, s.amount);
+    return { payment, remaining: 0 };
   }
+  const newRemaining = remaining - amount;
+  await tx.obligation.update({
+    where: { id: ob.id },
+    data: { status: newRemaining === 0 ? 'SETTLED' : paid + amount > 0 ? 'PARTIAL' : 'OPEN' },
+  });
+  return { payment, remaining: newRemaining };
 }
 
 /**
@@ -845,11 +893,16 @@ export async function deletePayment(obligationId: string, paymentId: string) {
     const p = await tx.payment.findUnique({ where: { id: paymentId }, include: { account: { select: { type: true } } } });
     if (!p || p.obligationId !== ob.id) throw notFound('Abono no encontrado');
     if (ob.transferId) throw conflict('Es una transferencia entre entidades: anúlala desde Transferencias');
-    if (p.account?.type === 'CREDIT_CARD') {
+    if (p.account?.type === 'CREDIT_CARD' && !p.linkedCharge) {
       throw conflict('Este pago se hizo con tarjeta (generó cuotas): no se puede deshacer desde aquí');
     }
     await tx.payment.delete({ where: { id: p.id } });
-    if (p.cashMovementId) await tx.cashMovement.delete({ where: { id: p.cashMovementId } });
+    if (p.linkedCharge) {
+      // Solo se desvincula: el consumo y su movimiento siguen en la tarjeta
+      await tx.cardCharge.updateMany({ where: { movementId: p.cashMovementId ?? '', obligationId: ob.id }, data: { obligationId: null } });
+    } else if (p.cashMovementId) {
+      await tx.cashMovement.delete({ where: { id: p.cashMovementId } });
+    }
     const agg = await tx.payment.aggregate({ where: { obligationId: ob.id }, _sum: { amount: true } });
     const paid = cents(agg._sum.amount);
     // Si se había liquidado con monto real, vuelve a la proyección original

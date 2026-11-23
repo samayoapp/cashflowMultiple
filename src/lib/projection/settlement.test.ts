@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { afterPaymentUndo, settleWithActual } from './settlement';
+import { afterPaymentUndo, rankLinkableCharges, settleWithActual } from './settlement';
 
 describe('liquidar con monto real', () => {
   it('mismo monto que lo proyectado: no guarda proyección', () => {
@@ -70,5 +70,24 @@ describe('deshacer un abono', () => {
       projectedAmount: 1_000_00,
       status: 'SETTLED',
     });
+  });
+});
+
+describe('consumos candidatos a vincular', () => {
+  const ch = (id: string, amount: number, purchaseDate: string) => ({ id, amount, purchaseDate });
+
+  it('prefiere el monto igual y luego la fecha más cercana', () => {
+    const ranked = rankLinkableCharges(
+      [ch('lejos', 5_000_00, '2026-11-10'), ch('igual-viejo', 1_250_00, '2026-09-01'), ch('igual', 1_250_00, '2026-11-12'), ch('parecido', 1_180_00, '2026-11-12')],
+      1_250_00,
+      '2026-11-15',
+    );
+    expect(ranked.map((c) => c.id)).toEqual(['igual', 'parecido', 'igual-viejo', 'lejos']);
+  });
+
+  it('no modifica el arreglo original', () => {
+    const list = [ch('a', 10_00, '2026-01-01'), ch('b', 100_00, '2026-01-01')];
+    rankLinkableCharges(list, 100_00, '2026-01-01');
+    expect(list[0].id).toBe('a');
   });
 });

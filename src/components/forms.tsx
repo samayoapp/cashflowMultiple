@@ -8,7 +8,7 @@ import { centsToDecimalString, formatMoney, toCents, type Cents } from '@/lib/mo
 import { addDays, formatShortDate } from '@/lib/dates';
 import { dueDateFor, nextDayOnOrAfter, statementCloseFor } from '@/lib/projection/card-cycle';
 import { useApp } from './AppContext';
-import { Button, cn, confirmDialog, ErrorBox, Field, Modal, Toggle, useToast } from './ui';
+import { Button, cn, confirmDialog, ErrorBox, Field, Modal, Tabs, Toggle, useToast } from './ui';
 import { CardImpactPreview, INSTALLMENT_OPTIONS, isCard, liquidAccounts } from './cards';
 import { CategorySelect } from './CategorySelect';
 
@@ -550,7 +550,18 @@ export interface ObligationLike {
   recurrenceId?: string | null;
   /** Monto proyectado original si se liquidó con un monto real distinto. */
   projectedAmount?: Cents | null;
-  payments?: { id: string; amount: Cents; date: string; accountName: string; byCard?: boolean }[];
+  payments?: {
+    id: string;
+    amount: Cents;
+    date: string;
+    accountName: string;
+    byCard?: boolean;
+    /** Sin mover caja (registro histórico). */
+    historical?: boolean;
+    /** Vinculado a un consumo de tarjeta ya registrado. */
+    linkedCharge?: boolean;
+    note?: string | null;
+  }[];
 }
 
 export function ObligationFormModal({
@@ -620,14 +631,19 @@ export function ObligationFormModal({
   const payments = obligation?.payments ?? [];
   const canDelete = Boolean(obligation) && payments.length === 0 && !obligation?.transferId && !obligation?.recurrenceId;
 
-  async function undoPayment(p: { id: string; amount: Cents; date: string; accountName: string }) {
+  async function undoPayment(p: NonNullable<ObligationLike['payments']>[number]) {
     if (!obligation) return;
     const cur = app.entityById.get(obligation.entityId)?.currency ?? 'HNL';
     const what = isIn ? 'cobro' : 'pago';
+    const effect = p.linkedCharge
+      ? 'El consumo se desvincula y sigue en la tarjeta (no cambia su deuda).'
+      : p.historical
+        ? 'No movió caja, así que ninguna cuenta cambia.'
+        : 'Se quita también del saldo de la cuenta.';
     if (
       !(await confirmDialog({
         title: `Deshacer ${what}`,
-        message: `¿Deshacer el ${what} de ${formatMoney(p.amount, cur)} del ${p.date} (${p.accountName})? Se quita también del saldo de la cuenta.`,
+        message: `¿Deshacer el ${what} de ${formatMoney(p.amount, cur)} del ${p.date} (${p.accountName})? ${effect}`,
         confirmLabel: `Deshacer ${what}`,
         tone: 'danger',
       }))
@@ -834,9 +850,13 @@ export function ObligationFormModal({
               {payments.map((p) => (
                 <li key={p.id} className="flex items-center gap-2 py-1.5">
                   <span className="tabular-nums">{p.date}</span>
-                  <span className="truncate text-slate-500">{p.byCard ? `💳 ${p.accountName}` : p.accountName}</span>
+                  <span className="min-w-0 truncate text-slate-500" title={p.note ?? undefined}>
+                    {p.byCard ? `💳 ${p.accountName}` : p.accountName}
+                    {p.linkedCharge ? ' · consumo vinculado' : ''}
+                    {p.historical && p.note ? ` · ${p.note}` : ''}
+                  </span>
                   <span className="ml-auto tabular-nums font-medium">{formatMoney(p.amount, app.entityById.get(obligation!.entityId)?.currency ?? 'HNL')}</span>
-                  {!p.byCard && (
+                  {(!p.byCard || p.linkedCharge) && (
                     <Button type="button" size="sm" variant="ghost" title={`Deshacer este ${isIn ? 'cobro' : 'pago'}`} loading={undoing === p.id} onClick={() => undoPayment(p)}>
                       <Undo2 className="h-4 w-4 text-rose-500" />
                     </Button>
@@ -851,8 +871,8 @@ export function ObligationFormModal({
               </p>
             )}
             <p className="mt-1 text-xs text-slate-500">
-              Deshacer quita el movimiento de la cuenta y la partida vuelve a quedar pendiente
-              {obligation!.projectedAmount != null ? ' con su monto proyectado' : ''}.
+              Deshacer quita el movimiento de la cuenta (un consumo vinculado solo se desvincula y sigue en la tarjeta) y la partida vuelve a
+              quedar pendiente{obligation!.projectedAmount != null ? ' con su monto proyectado' : ''}.
             </p>
           </div>
         )}
@@ -875,6 +895,20 @@ export function ObligationFormModal({
 }
 
 // ---------------------------------------------------------------- Abono / Pago
+/** Consumo de tarjeta que se puede vincular a una partida (GET /api/obligations/:id/linkable-charges). */
+interface LinkableCharge {
+  id: string;
+  cardName: string;
+  description: string;
+  counterpartyName: string | null;
+  purchaseDate: string;
+  amount: Cents;
+  currency: string | null;
+  originalAmount: Cents;
+}
+
+type PaySource = 'account' | 'charge' | 'noCash';
+
 export function PaymentModal({
   open,
   onClose,
@@ -899,25 +933,33 @@ export function PaymentModal({
 }) {
   const app = useApp();
   const { loading, error, run, setError } = useSubmit();
+  const [source, setSource] = useState<PaySource>('account');
   const accounts = useApi<AccountDto[]>(open && target ? `/api/accounts?ctx=${target.entityId}` : null);
+  const charges = useApi<LinkableCharge[]>(open && target && source === 'charge' ? `/api/obligations/${target.id}/linkable-charges` : null);
   // Una tarjeta solo sirve para pagar (no cobrar), y siempre por el saldo completo
   const active = useMemo(
     () => (accounts.data ?? []).filter((a) => !a.archived && (target?.direction === 'OUT' || !isCard(a))),
     [accounts.data, target?.direction],
   );
   const [accountId, setAccountId] = useState('');
+  const [chargeId, setChargeId] = useState('');
   const [amount, setAmount] = useState('');
   const [date, setDate] = useState(app.today);
+  const [note, setNote] = useState('');
   const [installments, setInstallments] = useState(1);
   /** Con monto real menor: true = cerrar la partida; false = dejar el resto pendiente. */
   const [closeShort, setCloseShort] = useState(true);
   const [updateRule, setUpdateRule] = useState(false);
-  const selected = active.find((a) => a.id === accountId);
+  const selected = source === 'account' ? active.find((a) => a.id === accountId) : undefined;
   const payingWithCard = Boolean(selected && isCard(selected));
+  const charge = source === 'charge' ? charges.data?.find((c) => c.id === chargeId) : undefined;
 
   useEffect(() => {
     if (!open || !target) return;
     setError(null);
+    setSource('account');
+    setChargeId('');
+    setNote('');
     setAmount(centsInput(target.remaining));
     setDate(defaultDate && defaultDate < app.today ? defaultDate : app.today);
     setInstallments(1);
@@ -943,60 +985,87 @@ export function PaymentModal({
   }, [active, accountId, mustChoose]);
 
   if (!target) return null;
+  const isIn = target.direction === 'IN';
   const currency = app.entityById.get(target.entityId)?.currency ?? 'HNL';
-  const verb = target.direction === 'IN' ? 'Cobro' : 'Pago';
+  const verb = isIn ? 'Cobro' : 'Pago';
   const parsed = parseMoneyInput(amount);
-  const actual = parsed !== null && Number(parsed) > 0 ? toCents(parsed) : null;
-  const diff = full && actual !== null ? actual - target.remaining : 0;
+  const typed = parsed !== null && Number(parsed) > 0 ? toCents(parsed) : null;
+  // Con un consumo vinculado, el monto real es el del consumo
+  const actual = source === 'charge' ? (charge?.amount ?? null) : typed;
+  const diff = (full || source === 'charge') && actual !== null ? actual - target.remaining : 0;
   // Con tarjeta no hay "resto pendiente": el consumo siempre cierra la partida
   const short = diff < 0 && !payingWithCard;
-  const settling = Boolean(full) && (!short || closeShort);
+  const settling = (Boolean(full) || source === 'charge') && (!short || closeShort);
   const adjusted = settling && diff !== 0;
+  // Pagar menos o cobrar más es a favor
+  const favorable = isIn ? diff > 0 : diff < 0;
+
+  const tabs: { id: PaySource; label: string }[] = [
+    { id: 'account', label: isIn ? 'A una cuenta' : 'Desde una cuenta' },
+    ...(isIn ? [] : [{ id: 'charge' as const, label: '💳 Ya está en la tarjeta' }]),
+    { id: 'noCash', label: 'Sin mover caja' },
+  ];
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+    if (source === 'charge' && !charge) return setError('Elige el consumo de tarjeta que corresponde');
     if (actual === null) return setError('Monto inválido');
+    if (source === 'noCash' && !note.trim()) return setError('Indica en la nota dónde quedó registrado el dinero');
+    const origin =
+      source === 'charge'
+        ? { chargeId }
+        : source === 'noCash'
+          ? { noCash: true, amount: parsed, date, note: note.trim() }
+          : { accountId, amount: parsed, date, ...(payingWithCard ? { installments } : {}) };
     const ok = await run(
       () =>
         api(`/api/obligations/${target!.id}/payments`, {
-          body: {
-            accountId,
-            amount: parsed,
-            date,
-            ...(payingWithCard ? { installments } : {}),
-            ...(settling ? { settle: true, ...(adjusted && updateRule ? { updateRule: true } : {}) } : {}),
-          },
+          body: { ...origin, ...(settling ? { settle: true, ...(adjusted && updateRule ? { updateRule: true } : {}) } : {}) },
         }),
-      payingWithCard
-        ? 'Pagado con tarjeta: se proyecta en su fecha de pago'
-        : adjusted
-          ? `${verb} registrado por el monto real`
-          : `${verb} registrado`,
+      source === 'charge'
+        ? 'Vinculado al consumo de tarjeta (no movió caja)'
+        : source === 'noCash'
+          ? `${verb} registrado sin mover caja`
+          : payingWithCard
+            ? 'Pagado con tarjeta: se proyecta en su fecha de pago'
+            : adjusted
+              ? `${verb} registrado por el monto real`
+              : `${verb} registrado`,
     );
     if (ok) onClose();
   }
 
   return (
-    <Modal open={open} onClose={onClose} title={full ? `Marcar como ${target.direction === 'IN' ? 'cobrado' : 'pagado'}` : `Registrar abono parcial`}>
+    <Modal open={open} onClose={onClose} title={full ? `Marcar como ${isIn ? 'cobrado' : 'pagado'}` : `Registrar abono parcial`}>
       <form onSubmit={submit} className="space-y-3">
         {error && <ErrorBox message={error} />}
         <p className="text-sm text-slate-600 dark:text-slate-400">
           {target.description} · Pendiente: <strong>{formatMoney(target.remaining, currency)}</strong>
         </p>
-        {accounts.data && active.length === 0 ? (
-          <ErrorBox message="Esta unidad de negocio no tiene cuentas activas. Crea una en Caja y Bancos → Cuentas." />
-        ) : (
-          <Field label={target.direction === 'IN' ? '¿A qué cuenta cae el dinero?' : 'Cuenta que paga'}>
-            <select className="input" value={accountId} onChange={(e) => setAccountId(e.target.value)} required autoFocus={mustChoose}>
-              {mustChoose && <option value="">Selecciona la cuenta que recibe…</option>}
-              {active.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {isCard(a) ? `💳 ${a.name} · deuda ${formatMoney(Math.max(-a.balance, 0), currency)}` : `${a.name} · ${formatMoney(a.balance, currency)}`}
-                </option>
-              ))}
-            </select>
-          </Field>
-        )}
+        <Tabs
+          tabs={tabs}
+          value={source}
+          onChange={(v) => {
+            setSource(v);
+            setError(null);
+          }}
+        />
+
+        {source === 'account' &&
+          (accounts.data && active.length === 0 ? (
+            <ErrorBox message="Esta unidad de negocio no tiene cuentas activas. Crea una en Caja y Bancos → Cuentas." />
+          ) : (
+            <Field label={isIn ? '¿A qué cuenta cae el dinero?' : 'Cuenta que paga'}>
+              <select className="input" value={accountId} onChange={(e) => setAccountId(e.target.value)} required autoFocus={mustChoose}>
+                {mustChoose && <option value="">Selecciona la cuenta que recibe…</option>}
+                {active.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {isCard(a) ? `💳 ${a.name} · deuda ${formatMoney(Math.max(-a.balance, 0), currency)}` : `${a.name} · ${formatMoney(a.balance, currency)}`}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          ))}
         {payingWithCard && (
           <Field label="Cuotas">
             <select className="input" value={installments} onChange={(e) => setInstallments(Number(e.target.value))}>
@@ -1008,29 +1077,84 @@ export function PaymentModal({
             </select>
           </Field>
         )}
-        <div className="grid grid-cols-2 gap-3">
-          <Field label={`Monto (${currency})`}>
-            <input
-              className="input text-right"
-              inputMode="decimal"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              readOnly={payingWithCard && !full}
-              required
-            />
-          </Field>
-          <Field label={payingWithCard ? 'Fecha de compra' : 'Fecha real'}>
-            <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
-          </Field>
-        </div>
-        {full && diff === 0 && (
+
+        {source === 'charge' && (
+          <div className="space-y-2">
+            <p className="text-xs text-slate-500">
+              Elige el consumo que ya registraste en la tarjeta. La partida queda pagada con ese consumo: no se crea ningún movimiento y la deuda de
+              la tarjeta no cambia.
+            </p>
+            {charges.loading && !charges.data ? (
+              <p className="text-sm text-slate-500">Buscando consumos…</p>
+            ) : !charges.data?.length ? (
+              <ErrorBox message="No hay consumos de tarjeta sin vincular en esta unidad." />
+            ) : (
+              <ul className="max-h-64 divide-y divide-slate-100 overflow-y-auto rounded-lg border border-slate-200 text-sm dark:divide-slate-800 dark:border-slate-700">
+                {charges.data.map((c) => (
+                  <li key={c.id}>
+                    <label
+                      className={cn(
+                        'flex cursor-pointer items-center gap-2 px-3 py-2',
+                        chargeId === c.id ? 'bg-sky-50 dark:bg-sky-950/40' : 'hover:bg-slate-50 dark:hover:bg-slate-900',
+                      )}
+                    >
+                      <input type="radio" name="charge" checked={chargeId === c.id} onChange={() => setChargeId(c.id)} />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate">{c.description}</span>
+                        <span className="block truncate text-xs text-slate-500">
+                          {formatShortDate(c.purchaseDate)} · 💳 {c.cardName}
+                          {c.counterpartyName ? ` · ${c.counterpartyName}` : ''}
+                        </span>
+                      </span>
+                      <span className="text-right tabular-nums">
+                        <span className="block font-medium">{formatMoney(c.amount, currency)}</span>
+                        {c.currency && <span className="block text-xs text-slate-500">{formatMoney(c.originalAmount, c.currency)}</span>}
+                      </span>
+                    </label>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+
+        {source !== 'charge' && (
+          <div className="grid grid-cols-2 gap-3">
+            <Field label={`Monto (${currency})`}>
+              <input
+                className="input text-right"
+                inputMode="decimal"
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+                readOnly={payingWithCard && !full}
+                required
+              />
+            </Field>
+            <Field label={payingWithCard ? 'Fecha de compra' : source === 'noCash' ? `Fecha en que se ${isIn ? 'cobró' : 'pagó'}` : 'Fecha real'}>
+              <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
+            </Field>
+          </div>
+        )}
+        {source === 'noCash' && (
+          <>
+            <Field label="Nota (obligatoria)" hint="¿Dónde quedó registrado el dinero? Ej.: «pagado con Visa, consumo del 12/11».">
+              <input className="input" value={note} onChange={(e) => setNote(e.target.value)} maxLength={300} required />
+            </Field>
+            <p className="rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-300">
+              No se mueve ninguna cuenta. Úsalo solo si el dinero ya está registrado en otro lado; si salió y no está registrado, el saldo de caja
+              quedará más alto de lo real.
+            </p>
+          </>
+        )}
+
+        {full && source !== 'charge' && diff === 0 && (
           <p className="-mt-1 text-xs text-slate-500">Si el monto real fue distinto a lo proyectado, cámbialo aquí.</p>
         )}
-        {full && diff !== 0 && actual !== null && (
+        {diff !== 0 && actual !== null && (
           <div className="space-y-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm dark:border-amber-900/60 dark:bg-amber-950/30">
             <p className="tabular-nums">
               Proyectado {formatMoney(target.remaining, currency)} → Real <strong>{formatMoney(actual, currency)}</strong> · Diferencia{' '}
-              <strong className={diff < 0 ? 'text-emerald-700 dark:text-emerald-400' : 'text-rose-700 dark:text-rose-400'}>
+              <strong className={favorable ? 'text-emerald-700 dark:text-emerald-400' : 'text-rose-700 dark:text-rose-400'}>
                 {diff > 0 ? '+' : '−'}
                 {formatMoney(Math.abs(diff), currency)}
               </strong>
@@ -1068,8 +1192,13 @@ export function PaymentModal({
           <Button type="button" onClick={onClose}>
             Cancelar
           </Button>
-          <Button type="submit" variant="primary" loading={loading} disabled={!accountId}>
-            Registrar {verb.toLowerCase()}
+          <Button
+            type="submit"
+            variant="primary"
+            loading={loading}
+            disabled={source === 'account' ? !accountId : source === 'charge' ? !charge : false}
+          >
+            {source === 'charge' ? 'Vincular consumo' : `Registrar ${verb.toLowerCase()}`}
           </Button>
         </div>
       </form>

@@ -596,7 +596,7 @@ export async function convertChargeToReimbursement(args: {
     });
     if (!charge) throw notFound('Consumo no encontrado');
     if (charge.isOpening) throw badRequest('Un saldo inicial de tarjeta no se puede asignar a otra unidad; registra el consumo por separado');
-    if (charge.obligationId) throw badRequest('Este consumo viene del pago de una CxP con tarjeta; asigna esa CxP a la otra unidad en su lugar');
+    if (charge.obligationId) throw badRequest('Este consumo corresponde a una CxP (pagada o vinculada con la tarjeta); asigna esa CxP a la otra unidad en su lugar');
     if (charge.reimbursementTransferId && charge.reimbursementTransfer?.status !== 'CANCELLED') {
       throw conflict('Este consumo ya está asignado a otra unidad con su reembolso');
     }

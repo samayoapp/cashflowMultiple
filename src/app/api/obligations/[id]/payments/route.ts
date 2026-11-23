@@ -13,7 +13,12 @@ import { todayInTz } from '@/lib/dates';
 export const dynamic = 'force-dynamic';
 
 const schema = z.object({
-  accountId: id,
+  /** Origen del dinero: exactamente uno de accountId, noCash o chargeId. */
+  accountId: id.optional(),
+  /** Registrar sin mover caja (el dinero ya está registrado en otro lado); exige nota. */
+  noCash: z.boolean().optional(),
+  /** Consumo de tarjeta ya registrado que corresponde a esta partida (no crea movimientos). */
+  chargeId: id.optional(),
   /** Si se omite, se liquida el saldo pendiente completo ("Marcar como pagado/cobrado"). */
   amount: positiveMoney.optional(),
   date: isoDate.optional(),
@@ -38,6 +43,8 @@ export const POST = route<{ params: { id: string } }>(async (req, { params }) =>
   await registerPayment({
     obligationId: o.id,
     accountId: data.accountId,
+    noCash: data.noCash,
+    chargeId: data.chargeId,
     amount: data.amount ?? remaining,
     date: data.date ?? todayInTz(settings.timezone),
     note: data.note,
