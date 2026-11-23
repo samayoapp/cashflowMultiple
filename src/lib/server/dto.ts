@@ -61,6 +61,8 @@ export function obligationDto(o: ObligationWith) {
     direction: o.direction,
     description: o.description,
     amount,
+    /** Monto proyectado original si se liquidó con un monto real distinto; null si no hubo ajuste. */
+    projectedAmount: o.projectedAmount === null ? null : cents(o.projectedAmount),
     paid,
     remaining: Math.max(amount - paid, 0),
     dueDate: isoOf(o.dueDate),

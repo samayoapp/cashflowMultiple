@@ -548,6 +548,8 @@ export interface ObligationLike {
   expenseDate?: string | null;
   transferId: string | null;
   recurrenceId?: string | null;
+  /** Monto proyectado original si se liquidó con un monto real distinto. */
+  projectedAmount?: Cents | null;
   payments?: { id: string; amount: Cents; date: string; accountName: string; byCard?: boolean }[];
 }
 
@@ -842,7 +844,16 @@ export function ObligationFormModal({
                 </li>
               ))}
             </ul>
-            <p className="mt-1 text-xs text-slate-500">Deshacer quita el movimiento de la cuenta y la partida vuelve a quedar pendiente.</p>
+            {obligation!.projectedAmount != null && (
+              <p className="mt-1 text-xs text-amber-700 dark:text-amber-400">
+                Liquidada por monto real: proyectado {formatMoney(obligation!.projectedAmount, app.entityById.get(obligation!.entityId)?.currency ?? 'HNL')} →
+                real {formatMoney(obligation!.amount, app.entityById.get(obligation!.entityId)?.currency ?? 'HNL')}.
+              </p>
+            )}
+            <p className="mt-1 text-xs text-slate-500">
+              Deshacer quita el movimiento de la cuenta y la partida vuelve a quedar pendiente
+              {obligation!.projectedAmount != null ? ' con su monto proyectado' : ''}.
+            </p>
           </div>
         )}
         <div className="flex items-center justify-end gap-2 pt-2">
@@ -873,7 +884,15 @@ export function PaymentModal({
 }: {
   open: boolean;
   onClose: () => void;
-  target: { id: string; entityId: string; direction: 'IN' | 'OUT'; description: string; remaining: Cents } | null;
+  target: {
+    id: string;
+    entityId: string;
+    direction: 'IN' | 'OUT';
+    description: string;
+    remaining: Cents;
+    recurrenceId?: string | null;
+  } | null;
+  /** "Marcar como pagado/cobrado": el monto es el real y cierra la partida aunque difiera de lo proyectado. */
   full?: boolean;
   /** Fecha propuesta (p. ej. la de una ocurrencia pasada); por defecto, hoy. */
   defaultDate?: string;
@@ -890,6 +909,9 @@ export function PaymentModal({
   const [amount, setAmount] = useState('');
   const [date, setDate] = useState(app.today);
   const [installments, setInstallments] = useState(1);
+  /** Con monto real menor: true = cerrar la partida; false = dejar el resto pendiente. */
+  const [closeShort, setCloseShort] = useState(true);
+  const [updateRule, setUpdateRule] = useState(false);
   const selected = active.find((a) => a.id === accountId);
   const payingWithCard = Boolean(selected && isCard(selected));
 
@@ -899,11 +921,14 @@ export function PaymentModal({
     setAmount(centsInput(target.remaining));
     setDate(defaultDate && defaultDate < app.today ? defaultDate : app.today);
     setInstallments(1);
+    setCloseShort(true);
+    setUpdateRule(false);
   }, [open, target, app.today, defaultDate, setError]);
 
+  // En abono parcial, la tarjeta paga el saldo completo; al liquidar se admite el monto real
   useEffect(() => {
-    if (payingWithCard && target) setAmount(centsInput(target.remaining));
-  }, [payingWithCard, target]);
+    if (payingWithCard && target && !full) setAmount(centsInput(target.remaining));
+  }, [payingWithCard, target, full]);
 
   // En un cobro hay que elegir a qué cuenta cae el dinero (salvo que solo haya una);
   // en un pago se propone la primera cuenta.
@@ -920,17 +945,33 @@ export function PaymentModal({
   if (!target) return null;
   const currency = app.entityById.get(target.entityId)?.currency ?? 'HNL';
   const verb = target.direction === 'IN' ? 'Cobro' : 'Pago';
+  const parsed = parseMoneyInput(amount);
+  const actual = parsed !== null && Number(parsed) > 0 ? toCents(parsed) : null;
+  const diff = full && actual !== null ? actual - target.remaining : 0;
+  // Con tarjeta no hay "resto pendiente": el consumo siempre cierra la partida
+  const short = diff < 0 && !payingWithCard;
+  const settling = Boolean(full) && (!short || closeShort);
+  const adjusted = settling && diff !== 0;
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    const a = parseMoneyInput(amount);
-    if (a === null || Number(a) <= 0) return setError('Monto inválido');
+    if (actual === null) return setError('Monto inválido');
     const ok = await run(
       () =>
         api(`/api/obligations/${target!.id}/payments`, {
-          body: { accountId, amount: a, date, ...(payingWithCard ? { installments } : {}) },
+          body: {
+            accountId,
+            amount: parsed,
+            date,
+            ...(payingWithCard ? { installments } : {}),
+            ...(settling ? { settle: true, ...(adjusted && updateRule ? { updateRule: true } : {}) } : {}),
+          },
         }),
-      payingWithCard ? 'Pagado con tarjeta: se proyecta en su fecha de pago' : `${verb} registrado`,
+      payingWithCard
+        ? 'Pagado con tarjeta: se proyecta en su fecha de pago'
+        : adjusted
+          ? `${verb} registrado por el monto real`
+          : `${verb} registrado`,
     );
     if (ok) onClose();
   }
@@ -974,7 +1015,7 @@ export function PaymentModal({
               inputMode="decimal"
               value={amount}
               onChange={(e) => setAmount(e.target.value)}
-              readOnly={full || payingWithCard}
+              readOnly={payingWithCard && !full}
               required
             />
           </Field>
@@ -982,8 +1023,46 @@ export function PaymentModal({
             <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
           </Field>
         </div>
+        {full && diff === 0 && (
+          <p className="-mt-1 text-xs text-slate-500">Si el monto real fue distinto a lo proyectado, cámbialo aquí.</p>
+        )}
+        {full && diff !== 0 && actual !== null && (
+          <div className="space-y-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm dark:border-amber-900/60 dark:bg-amber-950/30">
+            <p className="tabular-nums">
+              Proyectado {formatMoney(target.remaining, currency)} → Real <strong>{formatMoney(actual, currency)}</strong> · Diferencia{' '}
+              <strong className={diff < 0 ? 'text-emerald-700 dark:text-emerald-400' : 'text-rose-700 dark:text-rose-400'}>
+                {diff > 0 ? '+' : '−'}
+                {formatMoney(Math.abs(diff), currency)}
+              </strong>
+            </p>
+            {short && (
+              <div className="space-y-1">
+                <label className="flex items-center gap-2">
+                  <input type="radio" name="short" checked={closeShort} onChange={() => setCloseShort(true)} />
+                  Cerrar la partida con el monto real
+                </label>
+                <label className="flex items-center gap-2">
+                  <input type="radio" name="short" checked={!closeShort} onChange={() => setCloseShort(false)} />
+                  Dejar pendiente el resto ({formatMoney(-diff, currency)})
+                </label>
+              </div>
+            )}
+            {settling && (
+              <p className="text-xs text-slate-600 dark:text-slate-400">
+                La partida se cierra con el monto real; el proyectado queda en el historial.
+              </p>
+            )}
+            {settling && target.recurrenceId && (
+              <Toggle
+                checked={updateRule}
+                onChange={setUpdateRule}
+                label={<span className="text-sm">Usar este monto también para las próximas fechas de la recurrencia</span>}
+              />
+            )}
+          </div>
+        )}
         {payingWithCard && (
-          <CardImpactPreview card={selected} purchaseDate={date} amount={target.remaining} installments={installments} currency={currency} />
+          <CardImpactPreview card={selected} purchaseDate={date} amount={actual} installments={installments} currency={currency} />
         )}
         <div className="flex justify-end gap-2 pt-2">
           <Button type="button" onClick={onClose}>

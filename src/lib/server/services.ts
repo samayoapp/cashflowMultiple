@@ -9,6 +9,7 @@ import { insertCardCharge } from './cards';
 import { assertOnOrAfterOpening } from './account-opening';
 import { editTransferAmounts, repaymentTotals, splitTransferPayment } from '@/lib/projection/loans';
 import { assertCategory } from './catalog';
+import { afterPaymentUndo, settleWithActual } from '@/lib/projection/settlement';
 
 type Tx = Prisma.TransactionClient;
 
@@ -32,6 +33,13 @@ export interface RegisterPaymentArgs {
   note?: string | null;
   /** Solo si la cuenta es una tarjeta de crédito: número de cuotas (1..36). */
   installments?: number;
+  /**
+   * "Marcar como pagado/cobrado" con monto real: el abono cierra la partida aunque difiera
+   * del saldo pendiente; el monto pasa a ser el real y se conserva el proyectado.
+   */
+  settle?: boolean;
+  /** Con `settle` en una ocurrencia recurrente: usar el monto real también para las próximas. */
+  updateRule?: boolean;
   userId: string;
 }
 
@@ -46,7 +54,7 @@ export async function registerPaymentTx(tx: Tx, args: RegisterPaymentArgs) {
     if (ob.isHypothetical) throw conflict('Una partida hipotética no puede recibir abonos reales');
     if (ob.transferId) throw conflict('Esta partida es una transferencia: usa "Ejecutar transferencia"');
     if (ob.status === 'SETTLED' || ob.status === 'CANCELLED') throw conflict('La partida ya está cerrada');
-    if (args.amount > remaining) throw badRequest('El abono supera el saldo pendiente');
+    if (!args.settle && args.amount > remaining) throw badRequest('El abono supera el saldo pendiente');
 
     const account = await tx.account.findUnique({ where: { id: args.accountId } });
     if (!account || account.entityId !== ob.entityId) throw badRequest('La cuenta no pertenece a la unidad de negocio');
@@ -56,7 +64,7 @@ export async function registerPaymentTx(tx: Tx, args: RegisterPaymentArgs) {
     await assertOnOrAfterOpening(tx, account, args.date);
     if (isCard) {
       // Un consumo con tarjeta liquida la CxP completa: la deuda pasa a la tarjeta
-      if (args.amount !== remaining) throw badRequest('Con tarjeta se paga el saldo pendiente completo');
+      if (!args.settle && args.amount !== remaining) throw badRequest('Con tarjeta se paga el saldo pendiente completo');
       if (await tx.cardCharge.findUnique({ where: { obligationId: ob.id } })) {
         throw conflict('Esta partida ya fue pagada con tarjeta');
       }
@@ -99,6 +107,20 @@ export async function registerPaymentTx(tx: Tx, args: RegisterPaymentArgs) {
         createdById: args.userId,
       },
     });
+    if (args.settle) {
+      const s = settleWithActual({
+        amount: cents(ob.amount),
+        projectedAmount: ob.projectedAmount === null ? null : cents(ob.projectedAmount),
+        paid,
+        payment: args.amount,
+      });
+      await tx.obligation.update({
+        where: { id: ob.id },
+        data: { status: s.status, amount: dec(s.amount), projectedAmount: s.projectedAmount === null ? null : dec(s.projectedAmount) },
+      });
+      if (args.updateRule && ob.recurrenceId) await applyActualToRule(tx, ob.recurrenceId, ob.occurrenceDate, s.amount);
+      return { payment, remaining: 0 };
+    }
     const newRemaining = remaining - args.amount;
     await tx.obligation.update({
       where: { id: ob.id },
@@ -106,6 +128,26 @@ export async function registerPaymentTx(tx: Tx, args: RegisterPaymentArgs) {
     });
     return { payment, remaining: newRemaining };
   }
+}
+
+/**
+ * Usa el monto real de una ocurrencia para las próximas: actualiza la regla y las ocurrencias
+ * futuras ya materializadas que seguían abiertas, sin abonos y con el monto anterior de la regla.
+ */
+async function applyActualToRule(tx: Tx, ruleId: string, occurrenceDate: Date | null, amount: Cents) {
+  const rule = await tx.recurringRule.findUnique({ where: { id: ruleId } });
+  if (!rule || cents(rule.amount) === amount) return;
+  await tx.obligation.updateMany({
+    where: {
+      recurrenceId: rule.id,
+      status: 'OPEN',
+      payments: { none: {} },
+      amount: rule.amount,
+      ...(occurrenceDate ? { occurrenceDate: { gt: occurrenceDate } } : {}),
+    },
+    data: { amount: dec(amount) },
+  });
+  await tx.recurringRule.update({ where: { id: rule.id }, data: { amount: dec(amount) } });
 }
 
 /**
@@ -810,8 +852,20 @@ export async function deletePayment(obligationId: string, paymentId: string) {
     if (p.cashMovementId) await tx.cashMovement.delete({ where: { id: p.cashMovementId } });
     const agg = await tx.payment.aggregate({ where: { obligationId: ob.id }, _sum: { amount: true } });
     const paid = cents(agg._sum.amount);
-    const status = ob.status === 'CANCELLED' ? 'CANCELLED' : paid === 0 ? 'OPEN' : paid >= cents(ob.amount) ? 'SETTLED' : 'PARTIAL';
-    await tx.obligation.update({ where: { id: ob.id }, data: { status } });
+    // Si se había liquidado con monto real, vuelve a la proyección original
+    const r = afterPaymentUndo({
+      amount: cents(ob.amount),
+      projectedAmount: ob.projectedAmount === null ? null : cents(ob.projectedAmount),
+      paid,
+    });
+    await tx.obligation.update({
+      where: { id: ob.id },
+      data: {
+        status: ob.status === 'CANCELLED' ? 'CANCELLED' : r.status,
+        amount: dec(r.amount),
+        projectedAmount: r.projectedAmount === null ? null : dec(r.projectedAmount),
+      },
+    });
   });
 }
 

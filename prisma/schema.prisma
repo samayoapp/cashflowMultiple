@@ -260,6 +260,8 @@ model Obligation {
   direction      Direction
   description    String
   amount         Decimal              @db.Decimal(18, 2)
+  /// Monto proyectado original cuando se liquidó con un monto real distinto (NULL = sin ajuste)
+  projectedAmount Decimal?            @db.Decimal(18, 2)
   dueDate        DateTime             @db.Date
   expectedDate   DateTime             @db.Date
   status         ObligationStatus     @default(OPEN)

@@ -20,6 +20,10 @@ const schema = z.object({
   note: optionalText(300),
   /** Solo al pagar con tarjeta de crédito: cuotas (1..36). */
   installments: z.coerce.number().int().min(1).max(36).optional(),
+  /** Cierra la partida con este monto real aunque difiera del pendiente (se conserva el proyectado). */
+  settle: z.boolean().optional(),
+  /** Con `settle` en una ocurrencia recurrente: el monto real se usa también para las próximas. */
+  updateRule: z.boolean().optional(),
 });
 
 export const POST = route<{ params: { id: string } }>(async (req, { params }) => {
@@ -38,6 +42,8 @@ export const POST = route<{ params: { id: string } }>(async (req, { params }) =>
     date: data.date ?? todayInTz(settings.timezone),
     note: data.note,
     installments: data.installments,
+    settle: data.settle,
+    updateRule: data.updateRule,
     userId: user.id,
   });
   const updated = await prisma.obligation.findUniqueOrThrow({ where: { id: o.id }, include: obligationInclude });
